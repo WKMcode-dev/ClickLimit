@@ -1,4 +1,4 @@
-# ClickLimit / Industrial Lab v0.5.0
+# ClickLimit v0.6.0
 
 Laboratorio de cliques para Windows x64, em C++20/Win32. Interface industrial sci-fi em grafite e laranja, com paineis angulares e faixas diagonais. Janela redimensionavel: duas colunas em telas largas, uma coluna em janelas estreitas, rolagem vertical e escala por DPI.
 
@@ -79,3 +79,17 @@ Icone proprio incorporado em varias resolucoes ao executavel e metadados de vers
 Validacao: 24 casos de motor/layout; 120 ciclos de resize/scroll na janela oculta; 3120 verificacoes de posicao dos controles; objetos GDI passaram de 18 para 23, incluindo o cache de pintura, sem crescimento por ciclo. Nenhuma janela exibida e nenhum clique enviado durante estes testes. A reproducao visual em seu monitor ainda pode revelar casos nao cobertos.
 
 Assinatura: a entrega atual e **nao assinada**. Consulte SIGNING.md e tools/Sign-Release.ps1. O aviso de aplicativo desconhecido do SmartScreen pode continuar. Nenhuma configuracao de protecao do Windows foi alterada.
+
+## Novidades da v0.6
+
+Barra de rolagem da janela oculta, mantendo a rolagem pela roda do mouse. A roda sobre controles ou dropdowns rola o painel sem mudar a opcao selecionada, inclusive sobre a lista do dropdown. Cliques e teclado continuam selecionando opcoes. Deltas menores da roda sao acumulados, evitando perder movimentos em dispositivos de alta resolucao. O titulo da janela e do cabecalho e ClickLimit.
+
+Testes isolados adicionados para os quatro dropdowns e suas listas, garantindo selecao preservada e deslocamento do painel, mais acumulacao da roda e ausencia do estilo de scrollbar na janela.
+
+### Parada mais responsiva
+
+Turbo responsivo (indice 2, substitui o Turbo antigo) usa lotes de no maximo 16 repeticoes e uma espera cancelavel entre eles. Prioriza a resposta ao comando de parada, com menor velocidade de envio. Turbo sem espera (indice 3) mantem o caminho de envio maximo e os lotes configuraveis; pode acumular eventos no destino. O contador mede pares aceitos, nao a drenagem da fila.
+
+Ctrl+Alt+X sinaliza um evento para acordar esperas do motor. A verificacao adicional do teclado tambem passou a consultar a tecla com maior frequencia; nao ha prazo garantido em milissegundos. O botao Iniciar vira Parar durante operacao ou contagem. A parada cancela tambem a rodada de teste, sem esperar seu timeout. O Windows nao oferece nesta aplicacao um mecanismo para retirar cliques ja aceitos da fila do destino.
+
+26 casos do motor/layout passaram, incluindo cancelamento durante a pausa responsiva sem envio posterior e lote final de clique duplo. Os testes sao simulados; nao medem a latencia de parada no desktop real.

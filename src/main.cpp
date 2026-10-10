@@ -13,6 +13,7 @@
 #include <fstream>
 #include <filesystem>
 #include <shellapi.h>
+#include <commctrl.h>
 #include "engine.hpp"
 #include "layout.hpp"
 
@@ -30,6 +31,7 @@ std::atomic<double> seconds{0};
 std::atomic<unsigned long long> startedNs{0};
 std::atomic<DWORD> errorCode{0};
 std::thread worker;
+HANDLE stopEvent{};
 unsigned long long received = 0;
 ULONGLONG pending = 0, captureAt = 0;
 std::wstring configPath;
@@ -81,11 +83,12 @@ struct WindowsBackend {
         INPUT e{};e.type=INPUT_MOUSE;e.mi.dwFlags=ups[static_cast<unsigned>(button)];e.mi.dwExtraInfo=marker;
         SendInput(1,&e,sizeof(e));
     }
+    void pause(std::atomic<bool>& stopped){if(!stopped.load(std::memory_order_relaxed))WaitForSingleObject(stopEvent,1);}
     std::uint64_t nowNs(){const auto now=::nowNs();if(!startedNs.load(std::memory_order_relaxed))startedNs.store(now,std::memory_order_relaxed);return now;}
     void waitUntil(std::uint64_t deadline,std::atomic<bool>& stopped){
         while(!stopped.load(std::memory_order_relaxed)){
             const auto now=nowNs();if(now>=deadline)break;
-            if(deadline-now>2000000)Sleep(1);else SwitchToThread();
+            if(deadline-now>2000000)WaitForSingleObject(stopEvent,1);else SwitchToThread();
         }
     }
 };
@@ -108,7 +111,7 @@ bool emergency() {
     return (GetAsyncKeyState(VK_CONTROL) & 0x8000) && (GetAsyncKeyState(VK_MENU) & 0x8000) &&
            (GetAsyncKeyState('X') & 0x8000);
 }
-void stop() { pending = 0; captureAt = 0; cancel = true; }
+void stop() { pending = 0; captureAt = 0; testActive=false; cancel = true;if(stopEvent)SetEvent(stopEvent); }
 void join() { stop(); if (worker.joinable()) worker.join(); }
 
 bool parseNumber(int id, double low, double high, double& result) {
@@ -130,7 +133,8 @@ bool readOptions(Options& o) {
         o.limit = static_cast<unsigned long long>(number);
     }
     const int mode = selection(101);
-    if (mode == 2) o.interval = 0;
+    if(mode<0||mode>3)return false;
+    if (mode >= 2) {o.interval = 0;o.responsive=mode==2;if(o.responsive)o.batch=16;}
     else {
         if (!parseNumber(102, mode == 0 ? .001 : .000001, mode == 0 ? 1000000 : 3600000, number)) return false;
         o.interval = mode == 0 ? 1.0 / number : number / 1000.0;
@@ -151,6 +155,7 @@ void begin(const Options o) {
     if (running.load()) return;
     if (worker.joinable()) worker.join();
     cancel = false; failed = false; accepted = 0; seconds = 0; startedNs = 0; errorCode = 0; received = 0;
+    ResetEvent(stopEvent);
     running = true;
     SetTimer(window,1,100,nullptr);
     worker = std::thread([o] {
@@ -159,8 +164,8 @@ void begin(const Options o) {
         // Keep the emergency-key fallback outside the high-throughput loop.
         std::jthread watchdog([](std::stop_token token){
             while(!token.stop_requested()){
-                if(emergency())cancel.store(true,std::memory_order_relaxed);
-                Sleep(5);
+                if(emergency()){cancel.store(true,std::memory_order_relaxed);SetEvent(stopEvent);}
+                Sleep(1);
             }
         });
         WindowsBackend backend;
@@ -215,10 +220,16 @@ void saveConfig() {
     set(130, success ? L"Configuracoes salvas em ClickLimit.ini, ao lado do executavel." : L"Nao foi possivel salvar. Extraia o programa para uma pasta gravavel.");
 }
 
+LRESULT CALLBACK scrollInput(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT_PTR id,DWORD_PTR){
+    if(message==WM_MOUSEWHEEL){SendMessageW(window,message,wp,lp);return 0;}
+    if(message==WM_NCDESTROY)RemoveWindowSubclass(hwnd,scrollInput,id);
+    return DefSubclassProc(hwnd,message,wp,lp);
+}
 HWND control(const wchar_t* type, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id=0, bool setting=false) {
     HWND c = CreateWindowW(type, text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y, w, h, window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
+    SetWindowSubclass(c,scrollInput,1,0);
     if (setting) settings.push_back(c);
     return c;
 }
@@ -228,6 +239,8 @@ void combo(int x,int y,int w,int id,std::initializer_list<const wchar_t*> values
     HWND c=control(L"COMBOBOX",L"",CBS_DROPDOWNLIST|WS_TABSTOP|WS_VSCROLL,x,y,w,160,id,true);
     SetWindowTheme(c, L"DarkMode_CFD", nullptr);
     for (auto text:values) SendMessageW(c,CB_ADDSTRING,0,reinterpret_cast<LPARAM>(text));
+    COMBOBOXINFO info{sizeof(info)};
+    if(GetComboBoxInfo(c,&info)&&info.hwndList)SetWindowSubclass(info.hwndList,scrollInput,1,0);
 }
 void button(const wchar_t* text,int x,int y,int w,int id) { control(L"BUTTON",text,BS_OWNERDRAW|WS_TABSTOP,x,y,w,42,id); }
 void paintText(HDC dc,const wchar_t* text,RECT r,HFONT f,COLORREF color,UINT format=DT_LEFT|DT_SINGLELINE|DT_VCENTER) {
@@ -259,8 +272,8 @@ void drawScene(HDC dc){
     for(int x=0;x<w;x+=40){MoveToEx(dc,px(x),0,nullptr);LineTo(dc,px(x),client.bottom);}
     SelectObject(dc,old);DeleteObject(pen);
     stripe(dc,{20,14,w-40,7});
-    paintText(dc,L"CLICK / LIMIT",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"INDUSTRIAL INPUT LAB  //  05",screenRect({22,76,w-44,20}),smallFont,accent);
+    paintText(dc,L"ClickLimit",screenRect({20,29,w-40,41}),titleFont,ink);
+    paintText(dc,L"v0.6.0",screenRect({22,76,w-44,20}),smallFont,accent);
     if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
@@ -275,9 +288,6 @@ void applyLayout(){
     layout=clicklimit::makeLayout(MulDiv(client.right,96,dpi));
     const int height=MulDiv(client.bottom,96,dpi), maxScroll=std::max(0,layout.contentHeight-height);
     scrollY=std::clamp(scrollY,0,maxScroll);
-    // Keep the scrollbar gutter stable so resizing cannot recursively toggle columns.
-    SCROLLINFO si{sizeof(si),SIF_RANGE|SIF_PAGE|SIF_POS|SIF_DISABLENOSCROLL};si.nMin=0;si.nMax=layout.contentHeight-1;si.nPage=height;si.nPos=scrollY;
-    SetScrollInfo(window,SB_VERT,&si,TRUE);
     HDWP moves=BeginDeferWindowPos(static_cast<int>(layout.controls.size()));
     for(const auto& p:layout.controls){
         HWND child=GetDlgItem(window,p.id);if(!child)continue;
@@ -310,11 +320,13 @@ void refresh() {
     const bool locked = running.load() || pending || captureAt || testActive;
     for (HWND c:settings) enable(c,!locked);
     if (!locked) {
-        enable(item(102),selection(101)!=2); enable(item(103),selection(101)==2);
+        enable(item(102),selection(101)<2); enable(item(103),selection(101)==3);
         enable(item(105),!checked(104));
         enable(item(110),checked(109)); enable(item(111),checked(109));
     }
     for(int id:{120,121,122,123,112}) enable(item(id),!locked);
+    enable(item(120),true);
+    set(120,running.load()||pending||captureAt||testActive?L"PARAR / CTRL+ALT+X":L"INICIAR / CTRL+ALT+S");
     wchar_t text[256]{};
     const double elapsed=running.load() && startedNs.load()?static_cast<double>(nowNs()-startedNs.load())/1e9:seconds.load();
     swprintf_s(text,L"%llu cliques aceitos     /     %.3f s     /     %.0f cliques/s     /     %llu recebidos no teste",
@@ -335,7 +347,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         window=hwnd;
         dpi=headless?96:static_cast<int>(GetDpiForWindow(hwnd));createFonts();
         metrics=control(L"STATIC",L"",0,0,0,1,1,140);
-        label(L"Modo",0,0,1,201);combo(0,0,1,101,{L"Velocidade (CPS)",L"Intervalo (ms)",L"Turbo"});
+        label(L"Modo",0,0,1,201);combo(0,0,1,101,{L"Velocidade (CPS)",L"Intervalo (ms)",L"Turbo responsivo",L"Turbo sem espera"});
         label(L"Valor",0,0,1,202);edit(L"100",0,0,1,102);
         label(L"Lote turbo",0,0,1,203);combo(0,0,1,103,{L"1",L"16",L"64",L"256",L"1024"});
         label(L"Botao",0,0,1,204);combo(0,0,1,106,{L"Esquerdo",L"Direito",L"Meio"});
@@ -349,7 +361,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         button(L"INICIAR / CTRL+ALT+S",0,0,1,120);
         button(L"Salvar",0,0,1,121);button(L"Restaurar",0,0,1,122);button(L"Teste rapido",0,0,1,123);
         status=control(L"STATIC",L"",0,0,0,1,1,141);
-        control(L"STATIC",L"Ctrl+Alt+X para. Turbo envia lotes sem espera; os contadores indicam pares aceitos, nao recebimento externo.",0,0,0,1,1,130);
+        control(L"STATIC",L"Ctrl+Alt+X para. Turbo responsivo prioriza a parada. Sem espera pode deixar cliques na fila do Windows.",0,0,0,1,1,130);
         if(!headless && (!RegisterHotKey(hwnd,1,MOD_NOREPEAT|MOD_CONTROL|MOD_ALT,'S') ||
            !RegisterHotKey(hwnd,2,MOD_NOREPEAT|MOD_CONTROL|MOD_ALT,'X'))) {
             UnregisterHotKey(hwnd,1);UnregisterHotKey(hwnd,2);
@@ -361,7 +373,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     case WM_COMMAND:
         if(GetMessageExtraInfo()==static_cast<LPARAM>(marker)) return 0;
         switch(LOWORD(wp)) {
-        case 120:startFromControls(true);break;
+        case 120:if(running.load()||pending||captureAt||testActive)stop();else startFromControls(true);break;
         case 121:saveConfig();break;
         case 122:if(!running.load()){defaults();set(130,L"Configuracoes restauradas. Clique Salvar para manter os padroes.");}break;
         case 112:if(!running.load()){captureAt=GetTickCount64()+3000;SetTimer(hwnd,1,100,nullptr);}break;
@@ -441,7 +453,12 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         dpi=HIWORD(wp);createFonts();const auto r=reinterpret_cast<RECT*>(lp);
         SetWindowPos(hwnd,nullptr,r->left,r->top,r->right-r->left,r->bottom-r->top,SWP_NOZORDER|SWP_NOACTIVATE);applyLayout();return 0;
     }
-    case WM_MOUSEWHEEL:scrollY-=GET_WHEEL_DELTA_WPARAM(wp)/WHEEL_DELTA*70;applyLayout();return 0;
+    case WM_MOUSEWHEEL: {
+        static int remainder=0;
+        remainder+=GET_WHEEL_DELTA_WPARAM(wp);
+        const int steps=remainder/WHEEL_DELTA;remainder%=WHEEL_DELTA;
+        if(steps){scrollY-=steps*70;applyLayout();}return 0;
+    }
     case WM_VSCROLL: {
         SCROLLINFO si{sizeof(si),SIF_TRACKPOS};GetScrollInfo(hwnd,SB_VERT,&si);
         switch(LOWORD(wp)){case SB_LINEUP:scrollY-=35;break;case SB_LINEDOWN:scrollY+=35;break;
@@ -490,7 +507,7 @@ bool renderFile(const std::wstring& path,int width,int height){
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return ok;
 }
 bool isolatedUiTest(const std::wstring& report){
-    const DWORD initialGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    DWORD initialGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
     unsigned checks=0;bool ok=true;
     for(int i=0;i<120;++i){
         const int widths[]={480,820,1000,1440,460,799,800};
@@ -508,12 +525,38 @@ bool isolatedUiTest(const std::wstring& report){
             ++checks;
         }
         SendMessageW(window,WM_PAINT,0,0);
+        // Native themed controls initialize caches lazily. Check resource growth
+        // after the first ten warm-up cycles, including every width/height.
+        if(i==9)initialGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
     }
     const DWORD finalGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
-    ok=ok&&finalGdi<=initialGdi+6;
+    ok=ok&&finalGdi<=initialGdi;
+    ok=ok&&!(GetWindowLongPtrW(window,GWL_STYLE)&WS_VSCROLL);
+    unsigned wheelChecks=0;
+    for(int id:{101,103,106,107}){
+        COMBOBOXINFO info{sizeof(info)};GetComboBoxInfo(item(id),&info);
+        for(HWND target:{item(id),info.hwndList}){
+            scrollY=0;applyLayout();const auto before=selection(id);
+            SendMessageW(target,WM_MOUSEWHEEL,MAKEWPARAM(0,static_cast<WORD>(-WHEEL_DELTA)),0);
+            ok=ok&&selection(id)==before&&scrollY==70;++wheelChecks;
+        }
+    }
+    scrollY=0;applyLayout();
+    SendMessageW(item(101),WM_MOUSEWHEEL,MAKEWPARAM(0,static_cast<WORD>(-WHEEL_DELTA/2)),0);
+    ok=ok&&scrollY==0;
+    SendMessageW(item(101),WM_MOUSEWHEEL,MAKEWPARAM(0,static_cast<WORD>(-WHEEL_DELTA/2)),0);
+    ok=ok&&scrollY==70;
+    // Exercise the stop UI without ever starting an input worker.
+    running=true;testActive=true;pending=1;captureAt=1;cancel=false;ResetEvent(stopEvent);refresh();
+    ok=ok&&IsWindowEnabled(item(120))&&value(120)==L"PARAR / CTRL+ALT+X";
+    SendMessageW(window,WM_COMMAND,MAKEWPARAM(120,BN_CLICKED),reinterpret_cast<LPARAM>(item(120)));
+    ok=ok&&cancel.load()&&!testActive&&!pending&&!captureAt&&WaitForSingleObject(stopEvent,0)==WAIT_OBJECT_0;
+    running=false;refresh();
     std::ofstream file(std::filesystem::path(report),std::ios::binary);
     file<<(ok?"PASS":"FAIL")<<": 120 hidden resize/scroll cycles, "<<checks<<" native control geometry checks\n"
-        <<"GDI objects: "<<initialGdi<<" -> "<<finalGdi<<" (persistent paint cache included)\n"
+        <<"GDI objects after warm-up: "<<initialGdi<<" -> "<<finalGdi<<" (persistent paint cache included)\n"
+        <<wheelChecks<<" dropdown/list wheel checks; high-resolution wheel accumulation; no visible scrollbar.\n"
+        <<"Stop button and cancellation event verified without starting input worker.\n"
         <<"Window never shown; hotkeys, timers and input generation disabled.\n";
     return ok&&static_cast<bool>(file);
 }
@@ -526,6 +569,7 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     const int renderHeight=render?std::clamp(_wtoi(argv[4]),360,2000):740;
     const std::wstring renderPath=headless?argv[2]:L"";LocalFree(argv);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    stopEvent=CreateEventW(nullptr,TRUE,FALSE,nullptr);if(!stopEvent)return 1;
     wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
     configPath=path;configPath=configPath.substr(0,configPath.find_last_of(L"\\/")+1)+L"ClickLimit.ini";
     backgroundBrush=CreateSolidBrush(background);panelBrush=CreateSolidBrush(panel);editBrush=CreateSolidBrush(RGB(18,19,21));
@@ -533,9 +577,9 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101));
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=backgroundBrush;
     if(!RegisterClassW(&wc))return 1;
-    const DWORD style=WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN|WS_VSCROLL;
+    const DWORD style=WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN;
     RECT bounds{0,0,renderWidth,renderHeight};AdjustWindowRect(&bounds,style,FALSE);
-    HWND hwnd=CreateWindowW(wc.lpszClassName,L"ClickLimit / Industrial Lab v0.5.0",style,
+    HWND hwnd=CreateWindowW(wc.lpszClassName,L"ClickLimit",style,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
     BOOL dark=TRUE;DwmSetWindowAttribute(hwnd,20,&dark,sizeof(dark));
@@ -547,5 +591,5 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
         exitCode=result==-1?1:static_cast<int>(msg.wParam);
     }
     for(HFONT f:{font,titleFont,smallFont})if(f)DeleteObject(f);
-    DeleteObject(backgroundBrush);DeleteObject(panelBrush);DeleteObject(editBrush);return exitCode;
+    DeleteObject(backgroundBrush);DeleteObject(panelBrush);DeleteObject(editBrush);CloseHandle(stopEvent);return exitCode;
 }

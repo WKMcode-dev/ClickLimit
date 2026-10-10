@@ -10,7 +10,8 @@ void require(bool condition,const char* why){if(!condition)throw std::runtime_er
 struct FakeBackend {
     std::vector<Event> events;
     std::atomic<bool>* stop = nullptr;
-    unsigned sends=0, stopAt=0, partial=~0u, releases=0, error=0;
+    unsigned sends=0, stopAt=0, partial=~0u, releases=0, error=0, pauses=0;
+    bool cancelOnPause=false;
     std::uint64_t time=0, latency=0;
     std::vector<unsigned> requests;
     void prepare(const std::vector<Event>& input){events=input;}
@@ -22,10 +23,22 @@ struct FakeBackend {
     void release(Button){++releases;}
     std::uint64_t nowNs(){return time;}
     void waitUntil(std::uint64_t deadline,std::atomic<bool>&){time=std::max(time,deadline);}
+    void pause(std::atomic<bool>& stopped){++pauses;time+=1000000;if(cancelOnPause)stopped.store(true);}
 };
 int main(){
     try {
         unsigned passed=0;const auto progress=[](std::uint64_t){};
+        {
+            Options o;o.infinite=true;o.interval=0;o.responsive=true;o.batch=1024;
+            std::atomic<bool> stop{false};FakeBackend b;b.cancelOnPause=true;
+            const auto r=run(o,stop,b,progress);
+            require(r.cancelled&&r.clicks==16&&b.sends==1&&b.pauses==1,"stop during responsive pause; cap batch; no later send");++passed;
+        }
+        {
+            Options o;o.interval=0;o.responsive=true;o.batch=1024;o.limit=17;o.clicks=2;
+            std::atomic<bool> stop{false};FakeBackend b;const auto r=run(o,stop,b,progress);
+            require(r.clicks==34&&b.requests.size()==2&&b.requests[0]==64&&b.requests[1]==4&&b.pauses==1,"responsive finite double tail");++passed;
+        }
         for(unsigned button=0;button<3;++button)for(unsigned doubleClick=1;doubleClick<=2;++doubleClick){
             Options o;o.button=button;o.clicks=doubleClick;o.interval=0;o.limit=65;o.batch=64;
             std::atomic<bool> stop{false};FakeBackend backend;const auto r=run(o,stop,backend,progress);

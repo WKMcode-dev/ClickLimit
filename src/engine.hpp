@@ -10,7 +10,7 @@ enum class Button { left, right, middle };
 enum class Kind { move, down, up };
 struct Event { Kind kind; Button button; int x = 0, y = 0; };
 struct Options {
-    bool infinite = false, fixed = false;
+    bool infinite = false, fixed = false, responsive = false;
     std::uint64_t limit = 1000;
     unsigned button = 0, clicks = 1, batch = 64;
     double interval = .01;
@@ -25,7 +25,7 @@ struct Result {
 };
 // Materialize the complete buffer before measuring or starting the input loop.
 inline std::vector<Event> prepare(const Options& o) {
-    const unsigned capacity = o.interval == 0 ? o.batch : 1;
+    const unsigned capacity = o.interval == 0 ? (o.responsive ? std::min(16u,o.batch) : o.batch) : 1;
     std::vector<Event> events;
     events.reserve(capacity * o.clicks * 2 + (o.fixed ? 1 : 0));
     const auto button = static_cast<Button>(o.button);
@@ -40,7 +40,7 @@ inline std::vector<Event> prepare(const Options& o) {
 template<class Backend, class Progress>
 Result run(const Options& o, std::atomic<bool>& stop, Backend& backend, Progress progress) {
     Result result;
-    const unsigned capacity = o.interval == 0 ? o.batch : 1;
+    const unsigned capacity = o.interval == 0 ? (o.responsive ? std::min(16u,o.batch) : o.batch) : 1;
     const unsigned perCycle = o.clicks * 2;
     const unsigned prefix = o.fixed ? 1 : 0;
     const auto events = prepare(o);
@@ -68,7 +68,9 @@ Result run(const Options& o, std::atomic<bool>& stop, Backend& backend, Progress
             break;
         }
         if (++unpublished >= 16) { progress(result.clicks); unpublished = 0; }
-        if (o.interval > 0 && (o.infinite || result.cycles < o.limit)) {
+        if(stop.load(std::memory_order_relaxed))break;
+        if(o.responsive && o.interval==0 && (o.infinite || result.cycles<o.limit))backend.pause(stop);
+        else if (o.interval > 0 && (o.infinite || result.cycles < o.limit)) {
             const auto spacing = static_cast<std::uint64_t>(o.interval * 1e9);
             const auto now = backend.nowNs();
             deadline = std::max(deadline + spacing, now);
