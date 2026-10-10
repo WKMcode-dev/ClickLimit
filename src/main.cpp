@@ -40,6 +40,14 @@ using Options = clicklimit::Options;
 bool headless = false;
 int dpi = 96, scrollY = 0;
 clicklimit::Layout layout;
+bool layingOut = false;
+HDC paintBuffer{};
+HBITMAP paintBitmap{}, paintPrevious{};
+int paintWidth = 0, paintHeight = 0;
+void releasePaintBuffer(){
+    if(paintBuffer){SelectObject(paintBuffer,paintPrevious);DeleteObject(paintBitmap);DeleteDC(paintBuffer);}
+    paintBuffer=nullptr;paintBitmap=nullptr;paintWidth=paintHeight=0;
+}
 
 std::uint64_t nowNs() {
     static const auto frequency = [] { LARGE_INTEGER f{}; QueryPerformanceFrequency(&f); return f.QuadPart; }();
@@ -73,7 +81,7 @@ struct WindowsBackend {
         INPUT e{};e.type=INPUT_MOUSE;e.mi.dwFlags=ups[static_cast<unsigned>(button)];e.mi.dwExtraInfo=marker;
         SendInput(1,&e,sizeof(e));
     }
-    std::uint64_t nowNs(){return ::nowNs();}
+    std::uint64_t nowNs(){const auto now=::nowNs();if(!startedNs.load(std::memory_order_relaxed))startedNs.store(now,std::memory_order_relaxed);return now;}
     void waitUntil(std::uint64_t deadline,std::atomic<bool>& stopped){
         while(!stopped.load(std::memory_order_relaxed)){
             const auto now=nowNs();if(now>=deadline)break;
@@ -142,8 +150,9 @@ bool readOptions(Options& o) {
 void begin(const Options o) {
     if (running.load()) return;
     if (worker.joinable()) worker.join();
-    cancel = false; failed = false; accepted = 0; seconds = 0; errorCode = 0; received = 0;
+    cancel = false; failed = false; accepted = 0; seconds = 0; startedNs = 0; errorCode = 0; received = 0;
     running = true;
+    SetTimer(window,1,100,nullptr);
     worker = std::thread([o] {
         while(!cancel.load(std::memory_order_relaxed) &&
               ((GetAsyncKeyState(VK_CONTROL)&0x8000)||(GetAsyncKeyState(VK_MENU)&0x8000))) Sleep(1);
@@ -155,7 +164,6 @@ void begin(const Options o) {
             }
         });
         WindowsBackend backend;
-        startedNs.store(nowNs(),std::memory_order_relaxed);
         const auto result=clicklimit::run(o,cancel,backend,[](std::uint64_t count){accepted.store(count,std::memory_order_relaxed);});
         seconds.store(static_cast<double>(result.elapsedNs)/1e9,std::memory_order_relaxed);
         failed.store(result.failed);errorCode.store(result.error);
@@ -170,7 +178,7 @@ void startFromControls(bool delay) {
         MessageBoxW(window, L"Confira os valores. CPS: 0,001 a 1.000.000. Intervalo: 0,000001 a 3.600.000 ms. Repeticoes: 1 a 100.000.000. Use ponto para decimais e uma posicao dentro das telas.", L"Configuracao invalida", MB_OK | MB_ICONINFORMATION);
         return;
     }
-    if (delay) pending = GetTickCount64() + 3000;
+    if (delay) { pending = GetTickCount64() + 3000;SetTimer(window,1,100,nullptr); }
     else { pending = 0; begin(options); }
 }
 
@@ -208,7 +216,7 @@ void saveConfig() {
 }
 
 HWND control(const wchar_t* type, const wchar_t* text, DWORD style, int x, int y, int w, int h, int id=0, bool setting=false) {
-    HWND c = CreateWindowW(type, text, WS_CHILD | WS_VISIBLE | style, x, y, w, h, window,
+    HWND c = CreateWindowW(type, text, WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | style, x, y, w, h, window,
         reinterpret_cast<HMENU>(static_cast<INT_PTR>(id)), GetModuleHandleW(nullptr), nullptr);
     SendMessageW(c, WM_SETFONT, reinterpret_cast<WPARAM>(font), TRUE);
     if (setting) settings.push_back(c);
@@ -252,7 +260,7 @@ void drawScene(HDC dc){
     SelectObject(dc,old);DeleteObject(pen);
     stripe(dc,{20,14,w-40,7});
     paintText(dc,L"CLICK / LIMIT",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"INDUSTRIAL INPUT LAB  //  04",screenRect({22,76,w-44,20}),smallFont,accent);
+    paintText(dc,L"INDUSTRIAL INPUT LAB  //  05",screenRect({22,76,w-44,20}),smallFont,accent);
     if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
@@ -261,20 +269,34 @@ void drawScene(HDC dc){
     stripe(dc,{layout.test.x+16,layout.test.y+layout.test.h-13,layout.test.w-32,4});
 }
 void applyLayout(){
+    if(layingOut)return;
+    layingOut=true;
     RECT client{};GetClientRect(window,&client);
     layout=clicklimit::makeLayout(MulDiv(client.right,96,dpi));
     const int height=MulDiv(client.bottom,96,dpi), maxScroll=std::max(0,layout.contentHeight-height);
     scrollY=std::clamp(scrollY,0,maxScroll);
-    SCROLLINFO si{sizeof(si),SIF_RANGE|SIF_PAGE|SIF_POS};si.nMin=0;si.nMax=layout.contentHeight-1;si.nPage=height;si.nPos=scrollY;
+    // Keep the scrollbar gutter stable so resizing cannot recursively toggle columns.
+    SCROLLINFO si{sizeof(si),SIF_RANGE|SIF_PAGE|SIF_POS|SIF_DISABLENOSCROLL};si.nMin=0;si.nMax=layout.contentHeight-1;si.nPage=height;si.nPos=scrollY;
     SetScrollInfo(window,SB_VERT,&si,TRUE);
+    HDWP moves=BeginDeferWindowPos(static_cast<int>(layout.controls.size()));
     for(const auto& p:layout.controls){
         HWND child=GetDlgItem(window,p.id);if(!child)continue;
         const auto r=screenRect(p.box);
         // Combo height includes its popup list; the visible row stays 30 logical pixels.
         const int h=(p.id==101||p.id==103||p.id==106||p.id==107)?px(180):r.bottom-r.top;
-        MoveWindow(child,r.left,r.top,r.right-r.left,h,TRUE);
+        const UINT flags=SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW;
+        if(moves)moves=DeferWindowPos(moves,child,nullptr,r.left,r.top,r.right-r.left,h,flags);
+        else SetWindowPos(child,nullptr,r.left,r.top,r.right-r.left,h,flags);
     }
-    InvalidateRect(window,nullptr,FALSE);
+    if(moves)EndDeferWindowPos(moves);
+    else for(const auto& p:layout.controls){
+        const auto r=screenRect(p.box);const int h=(p.id==101||p.id==103||p.id==106||p.id==107)?px(180):r.bottom-r.top;
+        SetWindowPos(GetDlgItem(window,p.id),nullptr,r.left,r.top,r.right-r.left,h,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
+    }
+    layingOut=false;
+    // Invalidate parent AND child contents at their final positions. Moving pixels
+    // from the previous geometry caused stale backgrounds while scrolling/resizing.
+    RedrawWindow(window,nullptr,nullptr,RDW_INVALIDATE|RDW_ERASE|RDW_FRAME|RDW_ALLCHILDREN);
 }
 void createFonts(){
     for(HFONT f:{font,titleFont,smallFont})if(f)DeleteObject(f);
@@ -334,7 +356,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
             MessageBoxW(hwnd,L"Ctrl+Alt+S ou Ctrl+Alt+X esta em uso. Feche outra instancia ou o programa que usa essas teclas.",L"Atalhos indisponiveis",MB_OK|MB_ICONERROR);
             return -1;
         }
-        if(headless)defaults();else loadConfig(); applyLayout();refresh();if(!headless)SetTimer(hwnd,1,100,nullptr);return 0;
+        if(headless)defaults();else loadConfig(); applyLayout();refresh();return 0;
     }
     case WM_COMMAND:
         if(GetMessageExtraInfo()==static_cast<LPARAM>(marker)) return 0;
@@ -342,9 +364,11 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         case 120:startFromControls(true);break;
         case 121:saveConfig();break;
         case 122:if(!running.load()){defaults();set(130,L"Configuracoes restauradas. Clique Salvar para manter os padroes.");}break;
-        case 112:if(!running.load())captureAt=GetTickCount64()+3000;break;
+        case 112:if(!running.load()){captureAt=GetTickCount64()+3000;SetTimer(hwnd,1,100,nullptr);}break;
         case 123:
             if(!running.load()&&!pending&&!captureAt){
+                RECT client{};GetClientRect(hwnd,&client);
+                scrollY=std::max(0,layout.test.y+layout.test.h-MulDiv(client.bottom,96,dpi));applyLayout();
                 POINT target{px(layout.test.x+layout.test.w/2),px(layout.test.y+layout.test.h/2-scrollY)};ClientToScreen(hwnd,&target);
                 Options o;o.fixed=true;o.x=target.x;o.y=target.y;o.limit=10;o.interval=.02;
                 testActive=true;testDeadline=GetTickCount64()+6000;begin(o);
@@ -357,6 +381,10 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         if(wp==2)stop();
         refresh();return 0;
     case WM_TIMER: {
+        static bool wasActive=false;
+        const bool active=running.load()||pending||captureAt||testActive;
+        if(!active&&!wasActive){KillTimer(hwnd,1);return 0;}
+        wasActive=active;
         const auto now=GetTickCount64();
         if(captureAt&&now>=captureAt){POINT p{};GetCursorPos(&p);set(110,std::to_wstring(p.x));set(111,std::to_wstring(p.y));check(109,true);captureAt=0;}
         if(pending&&now>=pending){pending=0;startFromControls(false);}
@@ -393,10 +421,15 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     case WM_PRINTCLIENT:drawScene(reinterpret_cast<HDC>(wp));return 0;
     case WM_PAINT: {
         PAINTSTRUCT ps{};const auto dc=BeginPaint(hwnd,&ps);RECT r{};GetClientRect(hwnd,&r);
-        HDC buffer=CreateCompatibleDC(dc);HBITMAP bitmap=CreateCompatibleBitmap(dc,std::max<LONG>(1,r.right),std::max<LONG>(1,r.bottom));
-        const auto old=SelectObject(buffer,bitmap);drawScene(buffer);
-        BitBlt(dc,0,0,r.right,r.bottom,buffer,0,0,SRCCOPY);
-        SelectObject(buffer,old);DeleteObject(bitmap);DeleteDC(buffer);EndPaint(hwnd,&ps);return 0;
+        if(!paintBuffer||paintWidth!=r.right||paintHeight!=r.bottom){
+            releasePaintBuffer();paintBuffer=CreateCompatibleDC(dc);
+            paintBitmap=CreateCompatibleBitmap(dc,std::max<LONG>(1,r.right),std::max<LONG>(1,r.bottom));
+            if(paintBuffer&&paintBitmap){paintPrevious=static_cast<HBITMAP>(SelectObject(paintBuffer,paintBitmap));paintWidth=r.right;paintHeight=r.bottom;}
+            else {if(paintBitmap)DeleteObject(paintBitmap);if(paintBuffer)DeleteDC(paintBuffer);paintBuffer=nullptr;paintBitmap=nullptr;}
+        }
+        if(paintBuffer){drawScene(paintBuffer);BitBlt(dc,ps.rcPaint.left,ps.rcPaint.top,ps.rcPaint.right-ps.rcPaint.left,ps.rcPaint.bottom-ps.rcPaint.top,paintBuffer,ps.rcPaint.left,ps.rcPaint.top,SRCCOPY);}
+        else drawScene(dc);
+        EndPaint(hwnd,&ps);return 0;
     }
     case WM_SIZE:if(window)applyLayout();return 0;
     case WM_GETMINMAXINFO: {
@@ -417,7 +450,7 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     }
     case WM_ERASEBKGND:return 1;
     case WM_CLOSE:join();DestroyWindow(hwnd);return 0;
-    case WM_DESTROY:join();UnregisterHotKey(hwnd,1);UnregisterHotKey(hwnd,2);PostQuitMessage(0);return 0;
+    case WM_DESTROY:join();releasePaintBuffer();UnregisterHotKey(hwnd,1);UnregisterHotKey(hwnd,2);PostQuitMessage(0);return 0;
     }
     return DefWindowProcW(hwnd,message,wp,lp);
 }
@@ -456,27 +489,58 @@ bool renderFile(const std::wstring& path,int width,int height){
     file.write(reinterpret_cast<const char*>(pixels),static_cast<std::streamsize>(width)*height*4);const bool ok=static_cast<bool>(file);
     SelectObject(dc,old);DeleteObject(bitmap);DeleteDC(dc);return ok;
 }
+bool isolatedUiTest(const std::wstring& report){
+    const DWORD initialGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    unsigned checks=0;bool ok=true;
+    for(int i=0;i<120;++i){
+        const int widths[]={480,820,1000,1440,460,799,800};
+        const int heights[]={400,600,780};
+        RECT bounds{0,0,widths[i%7],heights[i%3]};
+        AdjustWindowRect(&bounds,static_cast<DWORD>(GetWindowLongPtrW(window,GWL_STYLE)),FALSE);
+        SetWindowPos(window,nullptr,0,0,bounds.right-bounds.left,bounds.bottom-bounds.top,SWP_NOMOVE|SWP_NOZORDER|SWP_NOACTIVATE);
+        SendMessageW(window,WM_MOUSEWHEEL,MAKEWPARAM(0,static_cast<WORD>(i%2?-WHEEL_DELTA:WHEEL_DELTA)),0);
+        RECT client{};GetClientRect(window,&client);
+        ok=ok&&scrollY>=0&&scrollY<=std::max(0,layout.contentHeight-MulDiv(client.bottom,96,dpi));
+        for(const auto& p:layout.controls){
+            RECT actual{};GetWindowRect(GetDlgItem(window,p.id),&actual);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&actual),2);
+            const auto expected=screenRect(p.box);
+            ok=ok&&actual.left==expected.left&&actual.top==expected.top&&actual.right==expected.right;
+            ++checks;
+        }
+        SendMessageW(window,WM_PAINT,0,0);
+    }
+    const DWORD finalGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
+    ok=ok&&finalGdi<=initialGdi+6;
+    std::ofstream file(std::filesystem::path(report),std::ios::binary);
+    file<<(ok?"PASS":"FAIL")<<": 120 hidden resize/scroll cycles, "<<checks<<" native control geometry checks\n"
+        <<"GDI objects: "<<initialGdi<<" -> "<<finalGdi<<" (persistent paint cache included)\n"
+        <<"Window never shown; hotkeys, timers and input generation disabled.\n";
+    return ok&&static_cast<bool>(file);
+}
 int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     int argc{};wchar_t** argv=CommandLineToArgvW(GetCommandLineW(),&argc);
-    headless=argc>=5&&std::wstring(argv[1])==L"--render";
-    const int renderWidth=headless?std::clamp(_wtoi(argv[3]),460,2400):1000;
-    const int renderHeight=headless?std::clamp(_wtoi(argv[4]),360,2000):740;
+    const bool uiTest=argc>=3&&std::wstring(argv[1])==L"--ui-test";
+    const bool render=argc>=5&&std::wstring(argv[1])==L"--render";
+    headless=render||uiTest;
+    const int renderWidth=render?std::clamp(_wtoi(argv[3]),460,2400):1000;
+    const int renderHeight=render?std::clamp(_wtoi(argv[4]),360,2000):740;
     const std::wstring renderPath=headless?argv[2]:L"";LocalFree(argv);
     SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     wchar_t path[MAX_PATH]{};GetModuleFileNameW(nullptr,path,MAX_PATH);
     configPath=path;configPath=configPath.substr(0,configPath.find_last_of(L"\\/")+1)+L"ClickLimit.ini";
     backgroundBrush=CreateSolidBrush(background);panelBrush=CreateSolidBrush(panel);editBrush=CreateSolidBrush(RGB(18,19,21));
     WNDCLASSW wc{};wc.lpfnWndProc=procedure;wc.hInstance=instance;wc.lpszClassName=L"ClickLimitWindow";
+    wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101));
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=backgroundBrush;
     if(!RegisterClassW(&wc))return 1;
     const DWORD style=WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN|WS_VSCROLL;
     RECT bounds{0,0,renderWidth,renderHeight};AdjustWindowRect(&bounds,style,FALSE);
-    HWND hwnd=CreateWindowW(wc.lpszClassName,L"ClickLimit / Industrial Lab v0.4.0",style,
+    HWND hwnd=CreateWindowW(wc.lpszClassName,L"ClickLimit / Industrial Lab v0.5.0",style,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
     BOOL dark=TRUE;DwmSetWindowAttribute(hwnd,20,&dark,sizeof(dark));
     int exitCode=0;
-    if(headless){exitCode=renderFile(renderPath,renderWidth,renderHeight)?0:2;DestroyWindow(hwnd);}
+    if(headless){exitCode=(uiTest?isolatedUiTest(renderPath):renderFile(renderPath,renderWidth,renderHeight))?0:2;DestroyWindow(hwnd);}
     else {
         ShowWindow(hwnd,show);UpdateWindow(hwnd);MSG msg{};int result{};
         while((result=GetMessageW(&msg,nullptr,0,0))>0){if(!IsDialogMessageW(hwnd,&msg)){TranslateMessage(&msg);DispatchMessageW(&msg);}}

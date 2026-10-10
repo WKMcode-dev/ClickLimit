@@ -1,4 +1,4 @@
-# ClickLimit / Industrial Lab v0.4.0
+# ClickLimit / Industrial Lab v0.5.0
 
 Laboratorio de cliques para Windows x64, em C++20/Win32. Interface industrial sci-fi em grafite e laranja, com paineis angulares e faixas diagonais. Janela redimensionavel: duas colunas em telas largas, uma coluna em janelas estreitas, rolagem vertical e escala por DPI.
 
@@ -43,7 +43,7 @@ Teste rapido envia 10 cliques do botao esquerdo para a area de teste da propria 
 
 A telemetria distingue pares aceitos pelo Windows de cliques recebidos nesta janela. Ela nao mede o recebimento por outros aplicativos. A taxa exibida e a media de envio desde o inicio da rodada. O tempo inclui as esperas do motor e nao mede a drenagem completa da fila do destino.
 
-Validacao v0.4 isolada: 24 casos aprovados com backend em memoria, sem SendInput, movimento do cursor ou atalhos globais. Inclui os tres botoes, clique simples/duplo, lote final, infinito, cancelamento, envio parcial, recuperacao de botao pressionado, agendamento e nove larguras entre 440 e 1920. Imagens de janelas largas e estreitas geradas fora da tela; controles nativos ocultos sao representados com seus valores atuais no renderizador.
+Validacao do motor isolada: 24 casos aprovados com backend em memoria, sem SendInput, movimento do cursor ou atalhos globais. Inclui os tres botoes, clique simples/duplo, lote final, infinito, cancelamento, envio parcial, recuperacao de botao pressionado, agendamento e nove larguras entre 440 e 1920. Imagens de janelas largas e estreitas geradas fora da tela; controles nativos ocultos sao representados com seus valores atuais no renderizador.
 
 Otimizacoes: buffers preparados uma vez; contagem local publicada a cada 16 lotes; leitura do relogio e consulta de teclado removidas do caminho de cada lote em Turbo. A verificacao adicional do atalho de parada roda em uma thread separada. Posicao fixa agora integra o movimento ao lote, evitando uma chamada separada por envio. Nao ha percentual de ganho ou recorde declarado: os testes desta versao nao medem a velocidade real de entrada no Windows.
 
@@ -69,3 +69,13 @@ cmake --build build --config Release
 - https://learn.microsoft.com/en-us/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter
 
 Testes isolados: ctest --test-dir build -C Release --output-on-failure. O executavel ClickLimitTests nao utiliza APIs de entrada do Windows.
+
+## Novidades da v0.5
+
+Reposicionamento em conjunto, descarte dos pixels antigos e repintura de todos os controles corrigem rastros durante scroll e resize. A faixa da barra de rolagem permanece estavel. O buffer de pintura e reutilizado, o temporizador para quando o aplicativo fica ocioso, e a compilacao Release utiliza otimizacao entre arquivos quando suportada. O tempo de envio comeca depois da preparacao dos buffers. Nao ha ganho real de cliques/s medido nesta versao.
+
+Icone proprio incorporado em varias resolucoes ao executavel e metadados de versao 0.5.0. O teste rapido leva a area de teste para dentro da janela antes de clicar.
+
+Validacao: 24 casos de motor/layout; 120 ciclos de resize/scroll na janela oculta; 3120 verificacoes de posicao dos controles; objetos GDI passaram de 18 para 23, incluindo o cache de pintura, sem crescimento por ciclo. Nenhuma janela exibida e nenhum clique enviado durante estes testes. A reproducao visual em seu monitor ainda pode revelar casos nao cobertos.
+
+Assinatura: a entrega atual e **nao assinada**. Consulte SIGNING.md e tools/Sign-Release.ps1. O aviso de aplicativo desconhecido do SmartScreen pode continuar. Nenhuma configuracao de protecao do Windows foi alterada.
