@@ -1,6 +1,6 @@
-# ClickLimit / Velocity Lab v0.3.0
+# ClickLimit / Industrial Lab v0.4.0
 
-Laboratorio de cliques para Windows x64, em C++20/Win32. Interface sci-fi com tema escuro, detalhes em ciano e telemetria. O visual e uma primeira proposta, pronta para adaptar a uma referencia futura.
+Laboratorio de cliques para Windows x64, em C++20/Win32. Interface industrial sci-fi em grafite e laranja, com paineis angulares e faixas diagonais. Janela redimensionavel: duas colunas em telas largas, uma coluna em janelas estreitas, rolagem vertical e escala por DPI.
 
 ## Como usar
 
@@ -43,13 +43,11 @@ Teste rapido envia 10 cliques do botao esquerdo para a area de teste da propria 
 
 A telemetria distingue pares aceitos pelo Windows de cliques recebidos nesta janela. Ela nao mede o recebimento por outros aplicativos. A taxa exibida e a media de envio desde o inicio da rodada. O tempo inclui as esperas do motor e nao mede a drenagem completa da fila do destino.
 
-Validacao no desktop desta maquina:
-- Teste rapido: 10 pares aceitos e 10 recebidos.
-- Infinito com limite finito configurado como 1: ultrapassou o limite e terminou pelo comando de parada com 1226 pares aceitos e 1226 recebidos.
-- Configuracoes salvas e recarregadas apos reabrir, incluindo Infinito. O aplicativo permaneceu parado ao abrir.
-- Interface renderizada e inspecionada. Compilacao Release x64 concluida com runtime C++ estatico.
+Validacao v0.4 isolada: 24 casos aprovados com backend em memoria, sem SendInput, movimento do cursor ou atalhos globais. Inclui os tres botoes, clique simples/duplo, lote final, infinito, cancelamento, envio parcial, recuperacao de botao pressionado, agendamento e nove larguras entre 440 e 1920. Imagens de janelas largas e estreitas geradas fora da tela; controles nativos ocultos sao representados com seus valores atuais no renderizador.
 
-Nenhum recorde de velocidade e declarado. O proximo passo de desempenho e um benchmark com repeticoes, comparacao de lotes e medicao de drenagem.
+Otimizacoes: buffers preparados uma vez; contagem local publicada a cada 16 lotes; leitura do relogio e consulta de teclado removidas do caminho de cada lote em Turbo. A verificacao adicional do atalho de parada roda em uma thread separada. Posicao fixa agora integra o movimento ao lote, evitando uma chamada separada por envio. Nao ha percentual de ganho ou recorde declarado: os testes desta versao nao medem a velocidade real de entrada no Windows.
+
+O caso simulado de 100 microssegundos (0,1 ms) valida a contagem dentro do prazo, sem confundir o envio que terminou depois do prazo. Ele nao representa cliques reais nem garante execucao nesse intervalo.
 
 ## Compatibilidade
 
@@ -69,3 +67,5 @@ cmake --build build --config Release
 
 - https://learn.microsoft.com/en-us/windows/win32/api/winuser/nf-winuser-sendinput
 - https://learn.microsoft.com/en-us/windows/win32/api/profileapi/nf-profileapi-queryperformancecounter
+
+Testes isolados: ctest --test-dir build -C Release --output-on-failure. O executavel ClickLimitTests nao utiliza APIs de entrada do Windows.
