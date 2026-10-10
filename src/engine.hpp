@@ -20,8 +20,9 @@ struct Options {
 struct SendResult { unsigned inserted = 0; unsigned error = 0; };
 struct Result {
     std::uint64_t clicks = 0, cycles = 0, withinBudget = 0, elapsedNs = 0;
+    std::uint64_t requestedEvents = 0, acceptedEvents = 0, rejectedEvents = 0, sendCalls = 0;
     unsigned error = 0;
-    bool failed = false, cancelled = false;
+    bool failed = false, cancelled = false, recoveryFailed = false;
 };
 // Materialize the complete buffer before measuring or starting the input loop.
 inline std::vector<Event> prepare(const Options& o) {
@@ -54,6 +55,10 @@ Result run(const Options& o, std::atomic<bool>& stop, Backend& backend, Progress
             std::min<std::uint64_t>(capacity, o.limit - result.cycles));
         const unsigned requested = prefix + cycles * perCycle;
         const SendResult sent = backend.send(requested);
+        ++result.sendCalls;
+        result.requestedEvents += requested;
+        result.acceptedEvents += sent.inserted;
+        result.rejectedEvents += requested - std::min(requested,sent.inserted);
         const unsigned mouseEvents = sent.inserted > prefix ? sent.inserted - prefix : 0;
         result.clicks += mouseEvents / 2;
         result.cycles += mouseEvents / perCycle;
@@ -64,7 +69,14 @@ Result run(const Options& o, std::atomic<bool>& stop, Backend& backend, Progress
         }
         if (sent.inserted != requested) {
             result.failed = true; result.error = sent.error;
-            if (mouseEvents % 2) backend.release(static_cast<Button>(o.button));
+            if (mouseEvents % 2) {
+                const auto recovery=backend.release(static_cast<Button>(o.button));
+                ++result.sendCalls;++result.requestedEvents;result.acceptedEvents+=recovery.inserted;
+                result.rejectedEvents+=recovery.inserted==1?0:1;
+                result.recoveryFailed=recovery.inserted!=1;
+                if(recovery.inserted==1){++result.clicks;if(mouseEvents%perCycle==perCycle-1)++result.cycles;}
+                else if(!result.error)result.error=recovery.error;
+            }
             break;
         }
         if (++unpublished >= 16) { progress(result.clicks); unpublished = 0; }

@@ -1,4 +1,4 @@
-# ClickLimit v0.6.0
+# ClickLimit v0.7.0
 
 Laboratorio de cliques para Windows x64, em C++20/Win32. Interface industrial sci-fi em grafite e laranja, com paineis angulares e faixas diagonais. Janela redimensionavel: duas colunas em telas largas, uma coluna em janelas estreitas, rolagem vertical e escala por DPI.
 
@@ -93,3 +93,9 @@ Turbo responsivo (indice 2, substitui o Turbo antigo) usa lotes de no maximo 16 
 Ctrl+Alt+X sinaliza um evento para acordar esperas do motor. A verificacao adicional do teclado tambem passou a consultar a tecla com maior frequencia; nao ha prazo garantido em milissegundos. O botao Iniciar vira Parar durante operacao ou contagem. A parada cancela tambem a rodada de teste, sem esperar seu timeout. O Windows nao oferece nesta aplicacao um mecanismo para retirar cliques ja aceitos da fila do destino.
 
 26 casos do motor/layout passaram, incluindo cancelamento durante a pausa responsiva sem envio posterior e lote final de clique duplo. Os testes sao simulados; nao medem a latencia de parada no desktop real.
+
+## Novidades da v0.7
+
+Auditoria de todos os eventos solicitados, aceitos e rejeitados em cada lote. O motor interrompe o envio parcial e informa a quantidade de eventos nao aceitos. O contador de cliques continua representando apenas pares completos retornados pela API.
+
+Inclui ClickLimitBenchmark.exe e o guia BENCHMARK.md. O ensaio real, preparado para Windows Sandbox, mede 1 segundo por rodada, compara lotes ate 4096 e verifica os cliques recebidos e a drenagem. A simulacao usa apenas memoria e nao representa desempenho do Windows. Nenhum recorde ou garantia universal de aceitacao e declarado.

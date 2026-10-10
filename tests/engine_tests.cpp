@@ -12,6 +12,7 @@ struct FakeBackend {
     std::atomic<bool>* stop = nullptr;
     unsigned sends=0, stopAt=0, partial=~0u, releases=0, error=0, pauses=0;
     bool cancelOnPause=false;
+    bool failRecovery=false;
     std::uint64_t time=0, latency=0;
     std::vector<unsigned> requests;
     void prepare(const std::vector<Event>& input){events=input;}
@@ -20,7 +21,7 @@ struct FakeBackend {
         if(stopAt&&sends==stopAt)stop->store(true);
         return {std::min(n,partial),error};
     }
-    void release(Button){++releases;}
+    SendResult release(Button){++releases;return {failRecovery?0u:1u,failRecovery?87u:0u};}
     std::uint64_t nowNs(){return time;}
     void waitUntil(std::uint64_t deadline,std::atomic<bool>&){time=std::max(time,deadline);}
     void pause(std::atomic<bool>& stopped){++pauses;time+=1000000;if(cancelOnPause)stopped.store(true);}
@@ -43,6 +44,7 @@ int main(){
             Options o;o.button=button;o.clicks=doubleClick;o.interval=0;o.limit=65;o.batch=64;
             std::atomic<bool> stop{false};FakeBackend backend;const auto r=run(o,stop,backend,progress);
             require(r.clicks==65*doubleClick&&r.cycles==65&&!r.failed,"finite tail/double count");
+            require(r.requestedEvents==130*doubleClick&&r.acceptedEvents==r.requestedEvents&&r.rejectedEvents==0&&r.sendCalls==2,"all events accepted audit");
             require(backend.requests.size()==2&&backend.requests.back()==2*doubleClick,"tail batch size");
             for(unsigned i=0;i<backend.events.size();++i){require(backend.events[i].button==static_cast<Button>(button),"button");require(backend.events[i].kind==(i%2?Kind::up:Kind::down),"event ordering");}
             ++passed;
@@ -58,9 +60,23 @@ int main(){
             std::atomic<bool> stop{false};FakeBackend b;b.partial=partialCount;b.error=5;
             const auto r=run(o,stop,b,progress);
             const unsigned mouse=partialCount?partialCount-1:0;
-            require(r.failed&&r.error==5&&r.clicks==mouse/2,"partial/error count");
+            require(r.failed&&r.error==5&&r.clicks==(mouse+1)/2,"partial/error count including accepted recovery");
+            require(r.requestedEvents==33+mouse%2&&r.acceptedEvents==partialCount+mouse%2&&r.rejectedEvents==33-partialCount&&r.sendCalls==1+mouse%2,"exact event acceptance audit including recovery");
             require(b.releases==mouse%2,"button-up recovery");
             require(b.events.front().kind==Kind::move&&b.events.front().x==-100,"fixed position prefix");++passed;
+        }
+        for(unsigned clicks:{1u,2u})for(unsigned partial=0;partial<1+16*clicks*2;++partial){
+            Options o;o.fixed=true;o.infinite=true;o.interval=0;o.batch=16;o.clicks=clicks;
+            std::atomic<bool> stop{false};FakeBackend b;b.partial=partial;
+            const auto r=run(o,stop,b,progress);const auto mouse=partial?partial-1:0;
+            require(r.failed&&b.requests.size()==1&&r.clicks==(mouse+1)/2,"every partial return stops without retry/duplication");
+            require(r.acceptedEvents==partial+mouse%2&&r.requestedEvents==1+32*clicks+mouse%2&&r.rejectedEvents==1+32*clicks-partial,"every partial return audit");++passed;
+        }
+        {
+            Options o;o.fixed=true;o.interval=0;o.batch=16;
+            std::atomic<bool> stop{false};FakeBackend b;b.partial=2;b.failRecovery=true;
+            const auto r=run(o,stop,b,progress);
+            require(r.failed&&r.recoveryFailed&&r.clicks==0&&r.acceptedEvents==2&&r.requestedEvents==34&&r.rejectedEvents==32,"failed recovery must not invent accepted click");++passed;
         }
         {
             Options o;o.infinite=true;o.interval=0;o.batch=8;o.budgetNs=100000;

@@ -30,6 +30,7 @@ std::atomic<unsigned long long> accepted{0};
 std::atomic<double> seconds{0};
 std::atomic<unsigned long long> startedNs{0};
 std::atomic<DWORD> errorCode{0};
+std::atomic<std::uint64_t> rejectedEvents{0},requestedEvents{0};
 std::thread worker;
 HANDLE stopEvent{};
 unsigned long long received = 0;
@@ -78,10 +79,10 @@ struct WindowsBackend {
         SetLastError(0);const UINT n=SendInput(count,inputs.data(),sizeof(INPUT));
         return {n,n==count?0u:GetLastError()};
     }
-    void release(clicklimit::Button button){
+    clicklimit::SendResult release(clicklimit::Button button){
         const DWORD ups[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
         INPUT e{};e.type=INPUT_MOUSE;e.mi.dwFlags=ups[static_cast<unsigned>(button)];e.mi.dwExtraInfo=marker;
-        SendInput(1,&e,sizeof(e));
+        SetLastError(0);const auto n=SendInput(1,&e,sizeof(e));return {n,n==1?0u:GetLastError()};
     }
     void pause(std::atomic<bool>& stopped){if(!stopped.load(std::memory_order_relaxed))WaitForSingleObject(stopEvent,1);}
     std::uint64_t nowNs(){const auto now=::nowNs();if(!startedNs.load(std::memory_order_relaxed))startedNs.store(now,std::memory_order_relaxed);return now;}
@@ -154,7 +155,7 @@ bool readOptions(Options& o) {
 void begin(const Options o) {
     if (running.load()) return;
     if (worker.joinable()) worker.join();
-    cancel = false; failed = false; accepted = 0; seconds = 0; startedNs = 0; errorCode = 0; received = 0;
+    cancel = false; failed = false; accepted = 0; seconds = 0; startedNs = 0; errorCode = 0; received = 0;rejectedEvents=0;requestedEvents=0;
     ResetEvent(stopEvent);
     running = true;
     SetTimer(window,1,100,nullptr);
@@ -172,6 +173,7 @@ void begin(const Options o) {
         const auto result=clicklimit::run(o,cancel,backend,[](std::uint64_t count){accepted.store(count,std::memory_order_relaxed);});
         seconds.store(static_cast<double>(result.elapsedNs)/1e9,std::memory_order_relaxed);
         failed.store(result.failed);errorCode.store(result.error);
+        rejectedEvents=result.rejectedEvents;requestedEvents=result.requestedEvents;
         running.store(false);
     });
 }
@@ -273,7 +275,7 @@ void drawScene(HDC dc){
     SelectObject(dc,old);DeleteObject(pen);
     stripe(dc,{20,14,w-40,7});
     paintText(dc,L"ClickLimit",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"v0.6.0",screenRect({22,76,w-44,20}),smallFont,accent);
+    paintText(dc,L"v0.7.0",screenRect({22,76,w-44,20}),smallFont,accent);
     if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
@@ -336,7 +338,7 @@ void refresh() {
     if(captureAt) state=L"CAPTURA EM "+std::to_wstring((captureAt-GetTickCount64()+999)/1000)+L" s  |  Posicione o cursor no local desejado.";
     else if(pending) state=L"INICIO EM "+std::to_wstring((pending-GetTickCount64()+999)/1000)+L" s  |  Posicione o cursor. Ctrl+Alt+X cancela.";
     else if(running.load()) state=checked(104)&&!testActive?L"INFINITO ATIVO  |  Ctrl + Alt + X para. Ctrl + Alt + S nao interrompe.":L"MOTOR ATIVO  |  Ctrl + Alt + X interrompe a rodada.";
-    else if(failed.load()) state=L"ENVIO INTERROMPIDO  |  Falha/bloqueio do Windows. Codigo: "+std::to_wstring(errorCode.load());
+    else if(failed.load()) state=L"ENVIO INTERROMPIDO | "+std::to_wstring(rejectedEvents.load())+L" eventos nao aceitos de "+std::to_wstring(requestedEvents.load())+L". Codigo: "+std::to_wstring(errorCode.load());
     else state=L"PRONTO  |  Ctrl + Alt + S inicia. Ctrl + Alt + X para em qualquer janela.";
     setText(status,state);
 }
