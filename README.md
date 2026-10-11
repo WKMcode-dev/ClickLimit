@@ -1,4 +1,4 @@
-# ClickLimit v0.7.2
+# ClickLimit v0.7.3
 
 Laboratorio de cliques para Windows x64, em C++20/Win32. Interface industrial sci-fi em grafite e laranja, com paineis angulares e faixas diagonais. Janela redimensionavel: duas colunas em telas largas, uma coluna em janelas estreitas, rolagem vertical e escala por DPI.
 
@@ -100,7 +100,7 @@ Auditoria de todos os eventos solicitados, aceitos e rejeitados em cada lote. O 
 
 Inclui ClickLimitBenchmark.exe e o guia BENCHMARK.md. O ensaio real, preparado para Windows Sandbox, mede 1 segundo por rodada, compara lotes ate 4096 e verifica os cliques recebidos e a drenagem. A simulacao usa apenas memoria e nao representa desempenho do Windows. Nenhum recorde ou garantia universal de aceitacao e declarado.
 
-## Correcao da v0.7.2
+## Correcao da v0.7.3
 
 O modo CPS passa a agrupar taxas de 1000 CPS ou mais em lotes correspondentes a aproximadamente 10 ms, ate 1024 repeticoes por chamada. A taxa e uma media: os cliques de um lote podem chegar em rajadas; o modo Intervalo continua enviando um ciclo por vez. O limite finito e respeitado exatamente, inclusive no lote final.
 
@@ -110,8 +110,12 @@ Validacao: 127 casos de motor/layout, teste real do temporizador sem SendInput (
 
 Referencia: https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw
 
-## Conferencia de recepcao (v0.7.2)
+## Conferencia de recepcao (v0.7.3)
 
 O fim do envio agora notifica a interface explicitamente. Atualizacoes dos cliques recebidos sao agrupadas, inclusive depois do fim do motor, evitando um contador visual congelado. A rodada aguarda pelo menos 500 ms; se esta janela recebeu parte dos cliques, aguarda ate 5 segundos para conferir o restante. Configuracoes ficam bloqueadas durante essa conferencia. Cliques aceitos e recebidos iguais geram RODADA CONFERIDA; diferenca persistente gera DIFERENCA NA RECEPCAO. Zero recebidos nao e prova de perda quando o destino e outro aplicativo. O tempo e CPS continuam referentes ao envio, nao ao processamento final do receptor.
 
 Essa correcao melhora a medicao e nao promete elevar o limite real de envio. Para investigar desempenho, compare rodadas finitas em Turbo sem espera com lotes 1, 16 e 64, sobre a area de teste; confirme os totais apos a conferencia. Ctrl+Alt+X interrompe novos envios, mas nao retira eventos ja inseridos na fila.
+
+## Atualizacao v0.7.3
+
+O contador recebe todos os eventos, mas a interface atualiza a cada 100 ms durante envio e conferencia. Removidas mensagens de atualizacao disparadas pelos cliques durante a rodada, que podiam competir com a fila de entrada. Mantida a conferencia final. Teste oculto verifica 10.000 mensagens locais sem gerar atualizacoes por clique ou entrada no desktop. O programa nao chama Beep/MessageBeep; a origem de sons relatados ainda nao foi confirmada.

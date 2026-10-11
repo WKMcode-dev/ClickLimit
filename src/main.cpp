@@ -306,7 +306,7 @@ void drawScene(HDC dc){
     SelectObject(dc,old);DeleteObject(pen);
     stripe(dc,{20,14,w-40,7});
     paintText(dc,L"ClickLimit",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"v0.7.2",screenRect({22,76,w-44,20}),smallFont,accent);
+    paintText(dc,L"v0.7.3",screenRect({22,76,w-44,20}),smallFont,accent);
     if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
@@ -460,8 +460,9 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
     case WM_LBUTTONUP:case WM_RBUTTONUP:case WM_MBUTTONUP:
         if(GetMessageExtraInfo()==static_cast<LPARAM>(marker)){
             ++received;
-            // Coalesce UI work; counting never depends on the repaint timer.
-            if(!receiverUpdatePending){receiverUpdatePending=true;PostMessageW(hwnd,receiverUpdated,0,0);}
+            // During sending/draining the 100ms timer refreshes the UI.
+            // Never post a refresh per input: it competes with the mouse queue.
+            if(!running.load()&&!draining&&!receiverUpdatePending){receiverUpdatePending=true;PostMessageW(hwnd,receiverUpdated,0,0);}
         }
         return 0;
     case WM_CONTEXTMENU:return 0;
@@ -608,7 +609,9 @@ bool isolatedUiTest(const std::wstring& report){
     accepted=1000;received=990;seconds=1;SendMessageW(window,roundFinished,0,0);
     ok=ok&&draining;
     const auto previousExtra=SetMessageExtraInfo(static_cast<LPARAM>(marker));
+    receiverUpdatePending=false;
     for(int i=0;i<10;++i)SendMessageW(window,WM_LBUTTONUP,0,0);
+    ok=ok&&!receiverUpdatePending; // No refresh-message flood while draining.
     SetMessageExtraInfo(previousExtra);SendMessageW(window,receiverUpdated,0,0);
     ok=ok&&received==1000&&value(140).find(L"1000 recebidos")!=std::wstring::npos;
     drainMinimum=0;SendMessageW(window,WM_TIMER,1,0);
@@ -616,7 +619,12 @@ bool isolatedUiTest(const std::wstring& report){
     received=999;SendMessageW(window,roundFinished,0,0);drainMinimum=drainDeadline=0;
     SendMessageW(window,WM_TIMER,1,0);
     ok=ok&&!draining&&value(141).find(L"DIFERENCA")!=std::wstring::npos;
-    accepted=received=0;refresh();
+    running=true;receiverUpdatePending=false;
+    const auto burstExtra=SetMessageExtraInfo(static_cast<LPARAM>(marker));
+    for(int i=0;i<10000;++i)SendMessageW(window,WM_LBUTTONUP,0,0);
+    SetMessageExtraInfo(burstExtra);
+    ok=ok&&!receiverUpdatePending&&received==10999;
+    running=false;accepted=received=0;refresh();
     // Exercise the real Windows timer, but never call prepare/send/SendInput.
     ResetEvent(stopEvent);std::atomic<bool> timerStop{false};WindowsBackend timing;
     const auto timingStart=::nowNs();
