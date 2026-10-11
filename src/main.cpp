@@ -39,6 +39,10 @@ ULONGLONG pending = 0, captureAt = 0;
 std::wstring configPath;
 bool testActive = false;
 ULONGLONG testDeadline = 0;
+constexpr UINT roundFinished = WM_APP + 10, receiverUpdated = WM_APP + 11;
+bool draining = false, receiverUpdatePending = false;
+ULONGLONG drainDeadline = 0, drainMinimum = 0;
+
 
 using Options = clicklimit::Options;
 bool headless = false;
@@ -175,9 +179,10 @@ bool readOptions(Options& o) {
 }
 
 void begin(const Options o) {
-    if (running.load()) return;
+    if (running.load() || draining) return;
     if (worker.joinable()) worker.join();
     cancel = false; failed = false; accepted = 0; seconds = 0; startedNs = 0; errorCode = 0; received = 0;rejectedEvents=0;requestedEvents=0;
+    draining=false;drainDeadline=drainMinimum=0;
     ResetEvent(stopEvent);
     sendNs=0;waitNs=0;sendCalls=0;
     running = true;
@@ -193,18 +198,19 @@ void begin(const Options o) {
             }
         });
         WindowsBackend backend;
-        backend.profile=o.interval>0;
+        backend.profile=true;
         const auto result=clicklimit::run(o,cancel,backend,[](std::uint64_t count){accepted.store(count,std::memory_order_relaxed);});
         seconds.store(static_cast<double>(result.elapsedNs)/1e9,std::memory_order_relaxed);
         failed.store(result.failed);errorCode.store(result.error);
         rejectedEvents=result.rejectedEvents;requestedEvents=result.requestedEvents;
         sendNs=backend.sending;waitNs=backend.waiting;sendCalls=backend.calls;
         running.store(false);
+        PostMessageW(window,roundFinished,0,0);
     });
 }
 
 void startFromControls(bool delay) {
-    if (running.load() || testActive) return;
+    if (running.load() || testActive || draining) return;
     Options options;
     if (!readOptions(options)) {
         MessageBoxW(window, L"Confira os valores. CPS: 0,001 a 1.000.000. Intervalo: 0,000001 a 3.600.000 ms. Repeticoes: 1 a 100.000.000. Use ponto para decimais e uma posicao dentro das telas.", L"Configuracao invalida", MB_OK | MB_ICONINFORMATION);
@@ -300,7 +306,7 @@ void drawScene(HDC dc){
     SelectObject(dc,old);DeleteObject(pen);
     stripe(dc,{20,14,w-40,7});
     paintText(dc,L"ClickLimit",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"v0.7.1",screenRect({22,76,w-44,20}),smallFont,accent);
+    paintText(dc,L"v0.7.2",screenRect({22,76,w-44,20}),smallFont,accent);
     if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
@@ -344,7 +350,7 @@ void createFonts(){
 }
 
 void refresh() {
-    const bool locked = running.load() || pending || captureAt || testActive;
+    const bool locked = running.load() || pending || captureAt || testActive || draining;
     for (HWND c:settings) enable(c,!locked);
     if (!locked) {
         enable(item(102),selection(101)<2); enable(item(103),selection(101)==3);
@@ -352,8 +358,8 @@ void refresh() {
         enable(item(110),checked(109)); enable(item(111),checked(109));
     }
     for(int id:{120,121,122,123,112}) enable(item(id),!locked);
-    enable(item(120),true);
-    set(120,running.load()||pending||captureAt||testActive?L"PARAR / CTRL+ALT+X":L"INICIAR / CTRL+ALT+S");
+    enable(item(120),!draining);
+    set(120,draining?L"CONFERINDO RECEPCAO":running.load()||pending||captureAt||testActive?L"PARAR / CTRL+ALT+X":L"INICIAR / CTRL+ALT+S");
     wchar_t text[256]{};
     const double elapsed=running.load() && startedNs.load()?static_cast<double>(nowNs()-startedNs.load())/1e9:seconds.load();
     swprintf_s(text,L"%llu cliques aceitos     /     %.3f s     /     %.0f cliques/s     /     %llu recebidos no teste",
@@ -363,7 +369,10 @@ void refresh() {
     if(captureAt) state=L"CAPTURA EM "+std::to_wstring((captureAt-GetTickCount64()+999)/1000)+L" s  |  Posicione o cursor no local desejado.";
     else if(pending) state=L"INICIO EM "+std::to_wstring((pending-GetTickCount64()+999)/1000)+L" s  |  Posicione o cursor. Ctrl+Alt+X cancela.";
     else if(running.load()) state=checked(104)&&!testActive?L"INFINITO ATIVO  |  Ctrl + Alt + X para. Ctrl + Alt + S nao interrompe.":L"MOTOR ATIVO  |  Ctrl + Alt + X interrompe a rodada.";
+    else if(draining) state=L"CONFERINDO RECEPCAO | Envio encerrado; aguardando a fila da janela.";
     else if(failed.load()) state=L"ENVIO INTERROMPIDO | "+std::to_wstring(rejectedEvents.load())+L" eventos nao aceitos de "+std::to_wstring(requestedEvents.load())+L". Codigo: "+std::to_wstring(errorCode.load());
+    else if(accepted.load() && received==accepted.load()) state=L"RODADA CONFERIDA | Todos os cliques aceitos foram recebidos nesta janela.";
+    else if(accepted.load() && received>0) state=L"DIFERENCA NA RECEPCAO | "+std::to_wstring(accepted.load()>received?accepted.load()-received:0)+L" cliques a menos nesta janela. Aceito nao significa recebido.";
     else state=L"PRONTO  |  Ctrl + Alt + S inicia. Ctrl + Alt + X para em qualquer janela.";
     setText(status,state);
     if(!running.load()&&sendCalls.load()){
@@ -425,12 +434,18 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         if(wp==1 && !running.load()&&!testActive&&!captureAt)startFromControls(false);
         if(wp==2)stop();
         refresh();return 0;
+    case roundFinished:
+        draining=true;drainMinimum=GetTickCount64()+500;drainDeadline=GetTickCount64()+5000;
+        SetTimer(hwnd,1,100,nullptr);refresh();return 0;
+    case receiverUpdated:
+        receiverUpdatePending=false;refresh();return 0;
     case WM_TIMER: {
         static bool wasActive=false;
-        const bool active=running.load()||pending||captureAt||testActive;
+        const bool active=running.load()||pending||captureAt||testActive||draining;
         if(!active&&!wasActive){KillTimer(hwnd,1);return 0;}
         wasActive=active;
         const auto now=GetTickCount64();
+        if(draining && now>=drainMinimum && (received>=accepted.load() || received==0 || now>=drainDeadline))draining=false;
         if(captureAt&&now>=captureAt){POINT p{};GetCursorPos(&p);set(110,std::to_wstring(p.x));set(111,std::to_wstring(p.y));check(109,true);captureAt=0;}
         if(pending&&now>=pending){pending=0;startFromControls(false);}
         if(testActive&&(!running.load()||now>=testDeadline)){
@@ -443,7 +458,11 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         refresh();return 0;
     }
     case WM_LBUTTONUP:case WM_RBUTTONUP:case WM_MBUTTONUP:
-        if(GetMessageExtraInfo()==static_cast<LPARAM>(marker))++received;
+        if(GetMessageExtraInfo()==static_cast<LPARAM>(marker)){
+            ++received;
+            // Coalesce UI work; counting never depends on the repaint timer.
+            if(!receiverUpdatePending){receiverUpdatePending=true;PostMessageW(hwnd,receiverUpdated,0,0);}
+        }
         return 0;
     case WM_CONTEXTMENU:return 0;
     case WM_CTLCOLORSTATIC:case WM_CTLCOLORBTN:case WM_CTLCOLORLISTBOX: {
@@ -585,6 +604,19 @@ bool isolatedUiTest(const std::wstring& report){
     SendMessageW(window,WM_COMMAND,MAKEWPARAM(120,BN_CLICKED),reinterpret_cast<LPARAM>(item(120)));
     ok=ok&&cancel.load()&&!testActive&&!pending&&!captureAt&&WaitForSingleObject(stopEvent,0)==WAIT_OBJECT_0;
     running=false;refresh();
+    // Emulate late receiver messages locally; no system mouse input is injected.
+    accepted=1000;received=990;seconds=1;SendMessageW(window,roundFinished,0,0);
+    ok=ok&&draining;
+    const auto previousExtra=SetMessageExtraInfo(static_cast<LPARAM>(marker));
+    for(int i=0;i<10;++i)SendMessageW(window,WM_LBUTTONUP,0,0);
+    SetMessageExtraInfo(previousExtra);SendMessageW(window,receiverUpdated,0,0);
+    ok=ok&&received==1000&&value(140).find(L"1000 recebidos")!=std::wstring::npos;
+    drainMinimum=0;SendMessageW(window,WM_TIMER,1,0);
+    ok=ok&&!draining&&value(141).find(L"RODADA CONFERIDA")!=std::wstring::npos;
+    received=999;SendMessageW(window,roundFinished,0,0);drainMinimum=drainDeadline=0;
+    SendMessageW(window,WM_TIMER,1,0);
+    ok=ok&&!draining&&value(141).find(L"DIFERENCA")!=std::wstring::npos;
+    accepted=received=0;refresh();
     // Exercise the real Windows timer, but never call prepare/send/SendInput.
     ResetEvent(stopEvent);std::atomic<bool> timerStop{false};WindowsBackend timing;
     const auto timingStart=::nowNs();
