@@ -1,0 +1,38 @@
+name: Validate distribution
+on:
+  push:
+    branches: [main]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  windows-validation:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate PowerShell syntax and unsigned-package rejection
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          Get-ChildItem tools -Filter '*Release.ps1' | ForEach-Object {
+            $tokens = $null
+            $errors = $null
+            [System.Management.Automation.Language.Parser]::ParseFile($_.FullName, [ref]$tokens, [ref]$errors) | Out-Null
+            if ($errors.Count) { throw ($errors | Out-String) }
+          }
+          $sdk = Get-ChildItem '${env:ProgramFiles(x86)}/Windows Kits/10/bin' -Filter signtool.exe -Recurse |
+            Where-Object { $_.Directory.Name -eq 'x64' } | Sort-Object FullName -Descending | Select-Object -First 1
+          if (-not $sdk) { throw 'SignTool nao encontrado.' }
+          $fixture = Join-Path $env:RUNNER_TEMP 'unsigned-package'
+          New-Item -ItemType Directory -Path $fixture | Out-Null
+          Set-Content -LiteralPath (Join-Path $fixture 'ClickLimit.exe') -Value 'unsigned test fixture'
+          $output = Join-Path $env:RUNNER_TEMP 'must-not-exist.zip'
+          $rejected = $false
+          try { & ./tools/Package-SignedRelease.ps1 -PackageDirectory $fixture -OutputZip $output -SignToolPath $sdk.FullName }
+          catch { $rejected = $true }
+          if (-not $rejected -or (Test-Path -LiteralPath $output)) { throw 'Pacote sem assinatura nao foi rejeitado corretamente.' }
+      - name: Build unchanged application
+        run: cmake -S . -B build -A x64
+      - run: cmake --build build --config Release
+      - name: Run isolated engine and simulated benchmark tests
+        run: ctest --test-dir build -C Release --output-on-failure -R "engine_and_layout|simulated_acceptance_benchmark"
