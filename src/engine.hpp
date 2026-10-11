@@ -12,7 +12,7 @@ struct Event { Kind kind; Button button; int x = 0, y = 0; };
 struct Options {
     bool infinite = false, fixed = false, responsive = false;
     std::uint64_t limit = 1000;
-    unsigned button = 0, clicks = 1, batch = 64;
+    unsigned button = 0, clicks = 1, batch = 64, scheduledBatch = 1;
     double interval = .01;
     int x = 0, y = 0;
     std::uint64_t budgetNs = 0;
@@ -26,7 +26,7 @@ struct Result {
 };
 // Materialize the complete buffer before measuring or starting the input loop.
 inline std::vector<Event> prepare(const Options& o) {
-    const unsigned capacity = o.interval == 0 ? (o.responsive ? std::min(16u,o.batch) : o.batch) : 1;
+    const unsigned capacity = o.interval == 0 ? (o.responsive ? std::min(16u,o.batch) : o.batch) : o.scheduledBatch;
     std::vector<Event> events;
     events.reserve(capacity * o.clicks * 2 + (o.fixed ? 1 : 0));
     const auto button = static_cast<Button>(o.button);
@@ -41,7 +41,7 @@ inline std::vector<Event> prepare(const Options& o) {
 template<class Backend, class Progress>
 Result run(const Options& o, std::atomic<bool>& stop, Backend& backend, Progress progress) {
     Result result;
-    const unsigned capacity = o.interval == 0 ? (o.responsive ? std::min(16u,o.batch) : o.batch) : 1;
+    const unsigned capacity = o.interval == 0 ? (o.responsive ? std::min(16u,o.batch) : o.batch) : o.scheduledBatch;
     const unsigned perCycle = o.clicks * 2;
     const unsigned prefix = o.fixed ? 1 : 0;
     const auto events = prepare(o);

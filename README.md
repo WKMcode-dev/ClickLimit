@@ -1,4 +1,4 @@
-# ClickLimit v0.7.0
+# ClickLimit v0.7.1
 
 Laboratorio de cliques para Windows x64, em C++20/Win32. Interface industrial sci-fi em grafite e laranja, com paineis angulares e faixas diagonais. Janela redimensionavel: duas colunas em telas largas, uma coluna em janelas estreitas, rolagem vertical e escala por DPI.
 
@@ -99,3 +99,13 @@ Ctrl+Alt+X sinaliza um evento para acordar esperas do motor. A verificacao adici
 Auditoria de todos os eventos solicitados, aceitos e rejeitados em cada lote. O motor interrompe o envio parcial e informa a quantidade de eventos nao aceitos. O contador de cliques continua representando apenas pares completos retornados pela API.
 
 Inclui ClickLimitBenchmark.exe e o guia BENCHMARK.md. O ensaio real, preparado para Windows Sandbox, mede 1 segundo por rodada, compara lotes ate 4096 e verifica os cliques recebidos e a drenagem. A simulacao usa apenas memoria e nao representa desempenho do Windows. Nenhum recorde ou garantia universal de aceitacao e declarado.
+
+## Correcao da v0.7.1
+
+O modo CPS passa a agrupar taxas de 1000 CPS ou mais em lotes correspondentes a aproximadamente 10 ms, ate 1024 repeticoes por chamada. A taxa e uma media: os cliques de um lote podem chegar em rajadas; o modo Intervalo continua enviando um ciclo por vez. O limite finito e respeitado exatamente, inclusive no lote final.
+
+A espera usa temporizador de alta resolucao e evento de cancelamento, com espera ativa curta no fim. Sistemas sem esse temporizador usam uma alternativa que pode consumir mais CPU. Ao terminar uma rodada programada, o rodape informa tempo medio por chamada de envio, tempo total de espera e quantidade de chamadas.
+
+Validacao: 127 casos de motor/layout, teste real do temporizador sem SendInput (20 esperas de 1 ms totalizaram aproximadamente 20,99 ms nesta execucao), cancelamento da espera e ensaios ocultos/simulados. Um modelo de 10 ms por chamada reproduz o teto de 100 CPS com lotes unitarios e valida a contagem/periodo com agrupamento. Isso nao comprova a causa da medicao do usuario ou ganho real de CPS; o novo diagnostico permite verificar a causa no proximo ensaio.
+
+Referencia: https://learn.microsoft.com/en-us/windows/win32/api/synchapi/nf-synchapi-createwaitabletimerexw

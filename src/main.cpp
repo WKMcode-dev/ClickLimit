@@ -31,6 +31,7 @@ std::atomic<double> seconds{0};
 std::atomic<unsigned long long> startedNs{0};
 std::atomic<DWORD> errorCode{0};
 std::atomic<std::uint64_t> rejectedEvents{0},requestedEvents{0};
+std::atomic<std::uint64_t> sendNs{0},waitNs{0},sendCalls{0};
 std::thread worker;
 HANDLE stopEvent{};
 unsigned long long received = 0;
@@ -60,6 +61,10 @@ std::uint64_t nowNs() {
 }
 struct WindowsBackend {
     std::vector<INPUT> inputs;
+    bool profile=false;
+    std::uint64_t sending=0,waiting=0,calls=0;
+    HANDLE timer=CreateWaitableTimerExW(nullptr,nullptr,CREATE_WAITABLE_TIMER_HIGH_RESOLUTION,TIMER_ALL_ACCESS);
+    ~WindowsBackend(){if(timer)CloseHandle(timer);}
     void prepare(const std::vector<clicklimit::Event>& events) {
         inputs.resize(events.size());
         const DWORD downs[]={MOUSEEVENTF_LEFTDOWN,MOUSEEVENTF_RIGHTDOWN,MOUSEEVENTF_MIDDLEDOWN};
@@ -76,8 +81,11 @@ struct WindowsBackend {
         }
     }
     clicklimit::SendResult send(unsigned count){
+        const auto before=profile?::nowNs():0;
         SetLastError(0);const UINT n=SendInput(count,inputs.data(),sizeof(INPUT));
-        return {n,n==count?0u:GetLastError()};
+        const auto error=n==count?0u:GetLastError();
+        if(profile){sending+=::nowNs()-before;++calls;}
+        return {n,error};
     }
     clicklimit::SendResult release(clicklimit::Button button){
         const DWORD ups[]={MOUSEEVENTF_LEFTUP,MOUSEEVENTF_RIGHTUP,MOUSEEVENTF_MIDDLEUP};
@@ -87,10 +95,19 @@ struct WindowsBackend {
     void pause(std::atomic<bool>& stopped){if(!stopped.load(std::memory_order_relaxed))WaitForSingleObject(stopEvent,1);}
     std::uint64_t nowNs(){const auto now=::nowNs();if(!startedNs.load(std::memory_order_relaxed))startedNs.store(now,std::memory_order_relaxed);return now;}
     void waitUntil(std::uint64_t deadline,std::atomic<bool>& stopped){
+        const auto before=profile?::nowNs():0;
         while(!stopped.load(std::memory_order_relaxed)){
             const auto now=nowNs();if(now>=deadline)break;
-            if(deadline-now>2000000)WaitForSingleObject(stopEvent,1);else SwitchToThread();
+            const auto remaining=deadline-now;
+            if(timer&&remaining>300000){
+                LARGE_INTEGER due{};due.QuadPart=-static_cast<LONGLONG>((remaining-150000)/100);
+                if(SetWaitableTimer(timer,&due,0,nullptr,nullptr,FALSE)){
+                    HANDLE handles[]={stopEvent,timer};WaitForMultipleObjects(2,handles,FALSE,INFINITE);
+                }else YieldProcessor();
+            }else if(!timer&&remaining>20000000)WaitForSingleObject(stopEvent,1);
+            else YieldProcessor();
         }
+        if(profile)waiting+=::nowNs()-before;
     }
 };
 
@@ -138,7 +155,12 @@ bool readOptions(Options& o) {
     if (mode >= 2) {o.interval = 0;o.responsive=mode==2;if(o.responsive)o.batch=16;}
     else {
         if (!parseNumber(102, mode == 0 ? .001 : .000001, mode == 0 ? 1000000 : 3600000, number)) return false;
-        o.interval = mode == 0 ? 1.0 / number : number / 1000.0;
+        if(mode==0){
+            // High CPS is a mean rate: amortize potentially slow per-call input
+            // insertion using approximately 10 ms worth of cycles per batch.
+            o.scheduledBatch=number>=1000?static_cast<unsigned>(std::min(1024.0,std::ceil(number/100.0))):1;
+            o.interval=o.scheduledBatch/number;
+        }else o.interval=number/1000.0;
     }
     if (o.fixed) {
         if (!parseNumber(110, -100000, 100000, number) || floor(number) != number) return false;
@@ -157,6 +179,7 @@ void begin(const Options o) {
     if (worker.joinable()) worker.join();
     cancel = false; failed = false; accepted = 0; seconds = 0; startedNs = 0; errorCode = 0; received = 0;rejectedEvents=0;requestedEvents=0;
     ResetEvent(stopEvent);
+    sendNs=0;waitNs=0;sendCalls=0;
     running = true;
     SetTimer(window,1,100,nullptr);
     worker = std::thread([o] {
@@ -170,10 +193,12 @@ void begin(const Options o) {
             }
         });
         WindowsBackend backend;
+        backend.profile=o.interval>0;
         const auto result=clicklimit::run(o,cancel,backend,[](std::uint64_t count){accepted.store(count,std::memory_order_relaxed);});
         seconds.store(static_cast<double>(result.elapsedNs)/1e9,std::memory_order_relaxed);
         failed.store(result.failed);errorCode.store(result.error);
         rejectedEvents=result.rejectedEvents;requestedEvents=result.requestedEvents;
+        sendNs=backend.sending;waitNs=backend.waiting;sendCalls=backend.calls;
         running.store(false);
     });
 }
@@ -275,7 +300,7 @@ void drawScene(HDC dc){
     SelectObject(dc,old);DeleteObject(pen);
     stripe(dc,{20,14,w-40,7});
     paintText(dc,L"ClickLimit",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"v0.7.0",screenRect({22,76,w-44,20}),smallFont,accent);
+    paintText(dc,L"v0.7.1",screenRect({22,76,w-44,20}),smallFont,accent);
     if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
@@ -341,6 +366,12 @@ void refresh() {
     else if(failed.load()) state=L"ENVIO INTERROMPIDO | "+std::to_wstring(rejectedEvents.load())+L" eventos nao aceitos de "+std::to_wstring(requestedEvents.load())+L". Codigo: "+std::to_wstring(errorCode.load());
     else state=L"PRONTO  |  Ctrl + Alt + S inicia. Ctrl + Alt + X para em qualquer janela.";
     setText(status,state);
+    if(!running.load()&&sendCalls.load()){
+        wchar_t diagnostic[256]{};
+        swprintf_s(diagnostic,L"DIAGNOSTICO | Envio medio: %.3f ms/chamada | Espera total: %.3f s | %llu chamadas",
+            static_cast<double>(sendNs.load())/sendCalls.load()/1e6,static_cast<double>(waitNs.load())/1e9,sendCalls.load());
+        set(130,diagnostic);
+    }
 }
 
 LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
@@ -554,11 +585,21 @@ bool isolatedUiTest(const std::wstring& report){
     SendMessageW(window,WM_COMMAND,MAKEWPARAM(120,BN_CLICKED),reinterpret_cast<LPARAM>(item(120)));
     ok=ok&&cancel.load()&&!testActive&&!pending&&!captureAt&&WaitForSingleObject(stopEvent,0)==WAIT_OBJECT_0;
     running=false;refresh();
+    // Exercise the real Windows timer, but never call prepare/send/SendInput.
+    ResetEvent(stopEvent);std::atomic<bool> timerStop{false};WindowsBackend timing;
+    const auto timingStart=::nowNs();
+    for(int i=0;i<20;++i){const auto deadline=::nowNs()+1000000;timing.waitUntil(deadline,timerStop);ok=ok&&::nowNs()>=deadline;}
+    const auto timerElapsed=::nowNs()-timingStart;
+    const auto cancelStart=::nowNs();
+    std::thread interrupter([&](){Sleep(10);timerStop=true;SetEvent(stopEvent);});
+    timing.waitUntil(cancelStart+2000000000ULL,timerStop);interrupter.join();
+    ok=ok&&timerStop.load()&&::nowNs()-cancelStart<1000000000ULL;
     std::ofstream file(std::filesystem::path(report),std::ios::binary);
     file<<(ok?"PASS":"FAIL")<<": 120 hidden resize/scroll cycles, "<<checks<<" native control geometry checks\n"
         <<"GDI objects after warm-up: "<<initialGdi<<" -> "<<finalGdi<<" (persistent paint cache included)\n"
         <<wheelChecks<<" dropdown/list wheel checks; high-resolution wheel accumulation; no visible scrollbar.\n"
         <<"Stop button and cancellation event verified without starting input worker.\n"
+        <<"20 real timer waits of 1ms: "<<static_cast<double>(timerElapsed)/1e6<<" ms total; cancelable long wait verified; no input sent.\n"
         <<"Window never shown; hotkeys, timers and input generation disabled.\n";
     return ok&&static_cast<bool>(file);
 }

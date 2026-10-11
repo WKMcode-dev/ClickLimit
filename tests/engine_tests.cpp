@@ -29,6 +29,13 @@ struct FakeBackend {
 int main(){
     try {
         unsigned passed=0;const auto progress=[](std::uint64_t){};
+        for(unsigned batch:{1u,10u}){
+            Options o;o.limit=1000;o.scheduledBatch=batch;o.interval=batch/1000.0;
+            std::atomic<bool> stop{false};FakeBackend b;b.latency=10000000;
+            const auto r=run(o,stop,b,progress);
+            require(r.clicks==1000&&r.acceptedEvents==2000&&r.rejectedEvents==0,"scheduled batching keeps exact click count");
+            require(r.elapsedNs==(batch==1?10000000000ULL:1000000000ULL),"slow-call model: amortized CPS scheduling");++passed;
+        }
         {
             Options o;o.infinite=true;o.interval=0;o.responsive=true;o.batch=1024;
             std::atomic<bool> stop{false};FakeBackend b;b.cancelOnPause=true;
