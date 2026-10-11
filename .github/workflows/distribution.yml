@@ -31,6 +31,8 @@ jobs:
           try { & ./tools/Package-SignedRelease.ps1 -PackageDirectory $fixture -OutputZip $output -SignToolPath $sdk.FullName }
           catch { $rejected = $true }
           if (-not $rejected -or (Test-Path -LiteralPath $output)) { throw 'Pacote sem assinatura nao foi rejeitado corretamente.' }
+          # A falha do SignTool acima e esperada neste teste negativo.
+          $global:LASTEXITCODE = 0
       - name: Build unchanged application
         run: cmake -S . -B build -A x64
       - run: cmake --build build --config Release
