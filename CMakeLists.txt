@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.20)
-project(ClickLimit VERSION 0.7.3 LANGUAGES CXX RC)
+project(ClickLimit VERSION 0.8.0 LANGUAGES CXX RC)
 include(CTest)
 if(NOT WIN32)
   message(FATAL_ERROR "ClickLimit requer Windows")

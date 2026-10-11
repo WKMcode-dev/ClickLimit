@@ -21,7 +21,7 @@ namespace {
 constexpr ULONG_PTR marker = 0x434C494D;
 constexpr COLORREF background = RGB(15, 16, 18), panel = RGB(34, 36, 39);
 constexpr COLORREF accent = RGB(255, 155, 32), ink = RGB(237, 236, 226), muted = RGB(147, 151, 156);
-HWND window{}, status{}, metrics{};
+HWND window{}, status{}, metrics{}, chrome{};
 HBRUSH backgroundBrush{}, panelBrush{}, editBrush{};
 HFONT font{}, titleFont{}, smallFont{};
 std::vector<HWND> settings;
@@ -290,12 +290,24 @@ void stripe(HDC dc,clicklimit::Box b){
     SelectObject(dc,oldPen);SelectObject(dc,old);DeleteObject(brush);RestoreDC(dc,-1);
 }
 void card(HDC dc,clicklimit::Box b,const wchar_t* title){
-    RECT r=screenRect(b);const int cut=px(12);
-    POINT p[]={{r.left+cut,r.top},{r.right,r.top},{r.right,r.bottom-cut},{r.right-cut,r.bottom},{r.left,r.bottom},{r.left,r.top+cut}};
+    RECT r=screenRect(b);const int cut=px(12), notch=px(6);
+    POINT p[]={{r.left+cut,r.top},{r.left+px(54),r.top},{r.left+px(62),r.top+notch},
+      {r.left+px(110),r.top+notch},{r.left+px(118),r.top},{r.right-cut,r.top},
+      {r.right,r.top+cut},{r.right,r.bottom-px(36)},{r.right-notch,r.bottom-px(30)},
+      {r.right-notch,r.bottom-cut},{r.right-cut*2,r.bottom},{r.left+px(92),r.bottom},
+      {r.left+px(84),r.bottom-notch},{r.left+px(42),r.bottom-notch},{r.left+px(34),r.bottom},
+      {r.left+cut,r.bottom},{r.left,r.bottom-cut},{r.left,r.top+px(57)},
+      {r.left+notch,r.top+px(51)},{r.left+notch,r.top+cut}};
     auto pen=CreatePen(PS_SOLID,1,RGB(101,104,108));auto oldPen=SelectObject(dc,pen);auto oldBrush=SelectObject(dc,panelBrush);
-    Polygon(dc,p,6);SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(pen);
+    Polygon(dc,p,static_cast<int>(std::size(p)));SelectObject(dc,oldBrush);SelectObject(dc,oldPen);DeleteObject(pen);
     RECT t=screenRect({b.x+16,b.y+12,b.w-32,21});paintText(dc,title,t,smallFont,ink);
     RECT bar=screenRect({b.x+16,b.y+35,42,3});auto orange=CreateSolidBrush(accent);FillRect(dc,&bar,orange);DeleteObject(orange);
+    for(int i=0;i<4;++i){
+        const int x=r.right-px(58)+i*px(9),y=r.bottom-px(12);
+        POINT marks[]={{x,y},{x+px(4),y},{x+px(9),y+px(5)},{x+px(5),y+px(5)}};
+        auto f=CreateSolidBrush(i==3?accent:RGB(87,91,95));auto previous=SelectObject(dc,f);
+        Polygon(dc,marks,4);SelectObject(dc,previous);DeleteObject(f);
+    }
     for(int i=0;i<3;++i){RECT bolt=screenRect({b.x+b.w-24-i*7,b.y+17,3,3});FillRect(dc,&bolt,GetSysColorBrush(COLOR_GRAYTEXT));}
 }
 void drawScene(HDC dc){
@@ -304,15 +316,36 @@ void drawScene(HDC dc){
     auto pen=CreatePen(PS_SOLID,1,RGB(25,26,28));auto old=SelectObject(dc,pen);
     for(int x=0;x<w;x+=40){MoveToEx(dc,px(x),0,nullptr);LineTo(dc,px(x),client.bottom);}
     SelectObject(dc,old);DeleteObject(pen);
-    stripe(dc,{20,14,w-40,7});
-    paintText(dc,L"ClickLimit",screenRect({20,29,w-40,41}),titleFont,ink);
-    paintText(dc,L"v0.7.3",screenRect({22,76,w-44,20}),smallFont,accent);
-    if(!layout.narrow)paintText(dc,L"STOP / CTRL + ALT + X",screenRect({w-260,41,240,26}),smallFont,accent,DT_RIGHT|DT_SINGLELINE|DT_VCENTER);
     card(dc,layout.telemetry,L"TLM / PARES ACEITOS PELO WINDOWS");
     const wchar_t* titles[]={L"01 / VELOCIDADE",L"02 / MOUSE",L"03 / REPETICAO",L"04 / POSICAO"};
     for(int i=0;i<4;++i)card(dc,layout.cards[i],titles[i]);
+    // Segmented rails with stepped orange bridges, inspired by the references.
+    for(int y:{198,layout.test.y-10}){
+        const int yy=px(y-scrollY),left=px(20),right=px(w-20),center=(left+right)/2;
+        auto rail=CreatePen(PS_SOLID,1,RGB(95,99,101));auto prior=SelectObject(dc,rail);
+        MoveToEx(dc,left,yy,nullptr);LineTo(dc,center-px(58),yy);LineTo(dc,center-px(50),yy-px(4));
+        LineTo(dc,center+px(50),yy-px(4));LineTo(dc,center+px(58),yy);LineTo(dc,right,yy);
+        SelectObject(dc,prior);DeleteObject(rail);
+        stripe(dc,{w/2-35,y-6,70,3});
+    }
     card(dc,layout.test,L"TEST / AREA PARA RECEBER CLIQUES");
     stripe(dc,{layout.test.x+16,layout.test.y+layout.test.h-13,layout.test.w-32,4});
+}
+void drawChrome(HDC dc){
+    RECT r{};GetClientRect(chrome,&r);FillRect(dc,&r,backgroundBrush);
+    paintText(dc,L"ClickLimit",{px(20),px(14),px(250),px(56)},titleFont,ink);
+    paintText(dc,L"v0.8.0  /  INPUT LAB",{px(22),px(57),r.right-px(160),px(79)},smallFont,accent);
+    auto pen=CreatePen(PS_SOLID,1,accent);auto previous=SelectObject(dc,pen);
+    MoveToEx(dc,px(20),px(92),nullptr);LineTo(dc,px(82),px(92));LineTo(dc,px(91),px(86));
+    LineTo(dc,r.right-px(95),px(86));LineTo(dc,r.right-px(86),px(92));LineTo(dc,r.right-px(20),px(92));
+    SelectObject(dc,previous);DeleteObject(pen);
+}
+LRESULT CALLBACK chromeProcedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp,UINT_PTR,DWORD_PTR){
+    if(message==WM_NCHITTEST)return HTTRANSPARENT;
+    if(message==WM_ERASEBKGND)return 1;
+    if(message==WM_PAINT){PAINTSTRUCT ps{};auto dc=BeginPaint(hwnd,&ps);drawChrome(dc);EndPaint(hwnd,&ps);return 0;}
+    if(message==WM_PRINTCLIENT){drawChrome(reinterpret_cast<HDC>(wp));return 0;}
+    return DefSubclassProc(hwnd,message,wp,lp);
 }
 void applyLayout(){
     if(layingOut)return;
@@ -335,6 +368,10 @@ void applyLayout(){
     else for(const auto& p:layout.controls){
         const auto r=screenRect(p.box);const int h=(p.id==101||p.id==103||p.id==106||p.id==107)?px(180):r.bottom-r.top;
         SetWindowPos(GetDlgItem(window,p.id),nullptr,r.left,r.top,r.right-r.left,h,SWP_NOZORDER|SWP_NOACTIVATE|SWP_NOCOPYBITS|SWP_NOREDRAW);
+    }
+    if(chrome){
+        SetWindowPos(chrome,HWND_TOP,0,0,client.right,px(100),SWP_NOACTIVATE);
+        for(int i=0;i<3;++i)SetWindowPos(item(150+i),HWND_TOP,client.right-px(152-i*46),px(19),px(40),px(36),SWP_NOACTIVATE);
     }
     layingOut=false;
     // Invalidate parent AND child contents at their final positions. Moving pixels
@@ -410,11 +447,17 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
             MessageBoxW(hwnd,L"Ctrl+Alt+S ou Ctrl+Alt+X esta em uso. Feche outra instancia ou o programa que usa essas teclas.",L"Atalhos indisponiveis",MB_OK|MB_ICONERROR);
             return -1;
         }
+        chrome=control(L"STATIC",L"",0,0,0,1,1,149);
+        SetWindowSubclass(chrome,chromeProcedure,2,0);
+        button(L"—",0,0,40,150);button(L"□",0,0,40,151);button(L"×",0,0,40,152);
         if(headless)defaults();else loadConfig(); applyLayout();refresh();return 0;
     }
     case WM_COMMAND:
         if(GetMessageExtraInfo()==static_cast<LPARAM>(marker)) return 0;
         switch(LOWORD(wp)) {
+        case 150:if(!headless)ShowWindow(hwnd,SW_MINIMIZE);break;
+        case 151:if(!headless)ShowWindow(hwnd,IsZoomed(hwnd)?SW_RESTORE:SW_MAXIMIZE);break;
+        case 152:SendMessageW(hwnd,WM_CLOSE,0,0);return 0;
         case 120:if(running.load()||pending||captureAt||testActive)stop();else startFromControls(true);break;
         case 121:saveConfig();break;
         case 122:if(!running.load()){defaults();set(130,L"Configuracoes restauradas. Clique Salvar para manter os padroes.");}break;
@@ -496,9 +539,28 @@ LRESULT CALLBACK procedure(HWND hwnd,UINT message,WPARAM wp,LPARAM lp) {
         else drawScene(dc);
         EndPaint(hwnd,&ps);return 0;
     }
-    case WM_SIZE:if(window)applyLayout();return 0;
+    case WM_NCCALCSIZE:return 0;
+    case WM_NCHITTEST:{
+        POINT point{static_cast<short>(LOWORD(lp)),static_cast<short>(HIWORD(lp))};ScreenToClient(hwnd,&point);
+        RECT r{};GetClientRect(hwnd,&r);const int edge=px(7);
+        if(!IsZoomed(hwnd)){
+            const bool left=point.x<edge,right=point.x>=r.right-edge,top=point.y<edge,bottom=point.y>=r.bottom-edge;
+            if(top&&left)return HTTOPLEFT;if(top&&right)return HTTOPRIGHT;
+            if(bottom&&left)return HTBOTTOMLEFT;if(bottom&&right)return HTBOTTOMRIGHT;
+            if(left)return HTLEFT;if(right)return HTRIGHT;if(top)return HTTOP;if(bottom)return HTBOTTOM;
+        }
+        if(point.y<px(100))return HTCAPTION;
+        return HTCLIENT;
+    }
+    case WM_SIZE:if(window){set(151,IsZoomed(hwnd)?L"▣":L"□");applyLayout();}return 0;
     case WM_GETMINMAXINFO: {
-        auto info=reinterpret_cast<MINMAXINFO*>(lp);RECT minimum{0,0,px(460),px(360)};
+        auto info=reinterpret_cast<MINMAXINFO*>(lp);
+        MONITORINFO monitor{sizeof(monitor)};
+        if(GetMonitorInfoW(MonitorFromWindow(hwnd,MONITOR_DEFAULTTONEAREST),&monitor)){
+            info->ptMaxPosition={monitor.rcWork.left-monitor.rcMonitor.left,monitor.rcWork.top-monitor.rcMonitor.top};
+            info->ptMaxSize={monitor.rcWork.right-monitor.rcWork.left,monitor.rcWork.bottom-monitor.rcWork.top};
+        }
+        RECT minimum{0,0,px(460),px(360)};
         AdjustWindowRectEx(&minimum,static_cast<DWORD>(GetWindowLongPtrW(hwnd,GWL_STYLE)),FALSE,0);
         info->ptMinTrackSize={minimum.right-minimum.left,minimum.bottom-minimum.top};return 0;
     }
@@ -532,8 +594,9 @@ bool renderFile(const std::wstring& path,int width,int height){
     void* pixels{};HDC dc=CreateCompatibleDC(nullptr);HBITMAP bitmap=CreateDIBSection(dc,&info,DIB_RGB_COLORS,&pixels,nullptr,0);
     if(!bitmap){DeleteDC(dc);return false;}auto old=SelectObject(dc,bitmap);
     // This window is never shown and rendering does not touch the user's desktop.
-    drawScene(dc);
+    drawScene(dc);drawChrome(dc);
     for(HWND child=GetWindow(window,GW_CHILD);child;child=GetWindow(child,GW_HWNDNEXT)){
+        if(child==chrome)continue;
         RECT r{};GetWindowRect(child,&r);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&r),2);
         SaveDC(dc);SetViewportOrgEx(dc,r.left,r.top,nullptr);
         IntersectClipRect(dc,0,0,r.right-r.left,r.bottom-r.top);
@@ -562,6 +625,11 @@ bool renderFile(const std::wstring& path,int width,int height){
 bool isolatedUiTest(const std::wstring& report){
     DWORD initialGdi=GetGuiResources(GetCurrentProcess(),GR_GDIOBJECTS);
     unsigned checks=0;bool ok=true;
+    ok=ok&&!(GetWindowLongPtrW(window,GWL_STYLE)&WS_CAPTION);
+    POINT drag{px(100),px(30)},edge{px(2),px(160)};
+    ClientToScreen(window,&drag);ClientToScreen(window,&edge);
+    ok=ok&&SendMessageW(window,WM_NCHITTEST,0,MAKELPARAM(drag.x,drag.y))==HTCAPTION;
+    ok=ok&&SendMessageW(window,WM_NCHITTEST,0,MAKELPARAM(edge.x,edge.y))==HTLEFT;
     for(int i=0;i<120;++i){
         const int widths[]={480,820,1000,1440,460,799,800};
         const int heights[]={400,600,780};
@@ -577,6 +645,8 @@ bool isolatedUiTest(const std::wstring& report){
             ok=ok&&actual.left==expected.left&&actual.top==expected.top&&actual.right==expected.right;
             ++checks;
         }
+        RECT header{};GetWindowRect(chrome,&header);MapWindowPoints(nullptr,window,reinterpret_cast<POINT*>(&header),2);
+        ok=ok&&header.top==0&&header.bottom==px(100)&&header.right==client.right;
         SendMessageW(window,WM_PAINT,0,0);
         // Native themed controls initialize caches lazily. Check resource growth
         // after the first ten warm-up cycles, including every width/height.
@@ -660,8 +730,8 @@ int WINAPI wWinMain(HINSTANCE instance,HINSTANCE,PWSTR,int show) {
     wc.hIcon=LoadIconW(instance,MAKEINTRESOURCEW(101));
     wc.hCursor=LoadCursorW(nullptr,IDC_ARROW);wc.hbrBackground=backgroundBrush;
     if(!RegisterClassW(&wc))return 1;
-    const DWORD style=WS_OVERLAPPEDWINDOW|WS_CLIPCHILDREN;
-    RECT bounds{0,0,renderWidth,renderHeight};AdjustWindowRect(&bounds,style,FALSE);
+    const DWORD style=WS_POPUP|WS_THICKFRAME|WS_SYSMENU|WS_MINIMIZEBOX|WS_MAXIMIZEBOX|WS_CLIPCHILDREN;
+    RECT bounds{0,0,renderWidth,renderHeight};// Custom nonclient layout uses the full window bounds as its client area.
     HWND hwnd=CreateWindowW(wc.lpszClassName,L"ClickLimit",style,
         CW_USEDEFAULT,CW_USEDEFAULT,bounds.right-bounds.left,bounds.bottom-bounds.top,nullptr,nullptr,instance,nullptr);
     if(!hwnd)return 1;
